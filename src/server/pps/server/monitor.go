@@ -38,6 +38,8 @@ import (
 	"github.com/pachyderm/pachyderm/src/server/pkg/backoff"
 	"github.com/pachyderm/pachyderm/src/server/pkg/ppsconsts"
 	"github.com/pachyderm/pachyderm/src/server/pkg/ppsutil"
+	"github.com/pachyderm/pachyderm/src/server/pkg/work"
+	"github.com/pachyderm/pachyderm/src/server/worker/driver"
 	workerserver "github.com/pachyderm/pachyderm/src/server/worker/server"
 )
 
@@ -341,13 +343,22 @@ func (m *ppsMaster) monitorPipeline(pachClient *client.APIClient, pipelineInfo *
 		if pipelineInfo.ParallelismSpec.Constant > 1 {
 			eg.Go(func() error {
 				return backoff.RetryNotify(func() error {
+					worker := work.NewWorker(
+						m.a.env.GetEtcdClient(),
+						m.a.etcdPrefix,
+						driver.WorkNamespace(pipelineInfo),
+					)
 					for {
-						pi, err := pachClient.InspectPipeline(pipeline)
+						unclaimedTasks, err := worker.UnclaimedTasks(pachClient.Ctx())
 						if err != nil {
 							return err
 						}
-						if pi.UnclaimedTasks > 0 {
-							n := pi.UnclaimedTasks
+						if unclaimedTasks > 0 {
+							kubeClient := m.a.env.GetKubeClient()
+							namespace := m.a.namespace
+							rc := kubeClient.CoreV1().ReplicationControllers(namespace)
+							scale, err := rc.GetScale(pipelineInfo.WorkerRc, metav1.GetOptions{})
+							n := int64(scale.Spec.Replicas) + int64(unclaimedTasks)
 							if n > int64(pipelineInfo.ParallelismSpec.Constant) {
 								n = int64(pipelineInfo.ParallelismSpec.Constant)
 							}
