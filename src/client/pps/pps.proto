@@ -464,6 +464,8 @@ message PipelineInfo {
   bool s3_out = 47;
   Metadata metadata = 48;
   int64 unclaimed_tasks = 52;
+  string worker_rc = 53;
+  bool autoscaling = 54;
 }
 
 message PipelineInfos {
@@ -632,9 +634,6 @@ message ListDatumRequest {
   // The datums listed are the ones that would be run if a pipeline was created
   // with input.
   Input input = 4;
-  // Enables retrieving only status information for datums, rather than including the
-  // inputs and time spent, which improves performance.
-  bool status_only = 5;
   int64 page_size = 2;
   int64 page = 3;
 }
@@ -717,6 +716,7 @@ message CreatePipelineRequest {
   string pod_patch = 32; // a json patch will be applied to the pipeline's pod_spec before it's created;
   pfs.Commit spec_commit = 34;
   Metadata metadata = 46;
+  bool autoscaling = 48;
 }
 
 message InspectPipelineRequest {
