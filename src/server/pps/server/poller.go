@@ -224,6 +224,7 @@ func (m *ppsMaster) pollPipelinePods(pollClient *client.APIClient) {
 					}
 				}
 			}
+			return backoff.ErrContinue // keep polling until cancelled (RetryUntilCancel)
 		}
 	}, backoff.NewInfiniteBackOff(), backoff.NotifyContinue("pollPipelinePods"),
 	); err != nil && ctx.Err() == nil {
