@@ -46,6 +46,8 @@ var (
 )
 
 const (
+	defaultPachdShards = 16
+
 	defaultDashImage   = "pachyderm/dash"
 	defaultDashVersion = "0.5.57"
 
