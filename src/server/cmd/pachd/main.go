@@ -262,13 +262,15 @@ func doSidecarMode(config interface{}) (retErr error) {
 		return err
 	}
 	txnEnv := &txnenv.TransactionEnv{}
+	var blockAPIServer pfs_server.BlockAPIServer
 	if !env.StorageV2 {
 		blockCacheBytes, err := units.RAMInBytes(env.BlockCacheBytes)
 		if err != nil {
 			return errors.Wrapf(err, "units.RAMInBytes")
 		}
 		if err := logGRPCServerSetup("Block API", func() error {
-			blockAPIServer, err := pfs_server.NewBlockAPIServer(env.StorageRoot, blockCacheBytes, env.StorageBackend, net.JoinHostPort(env.EtcdHost, env.EtcdPort), false)
+			var err error
+			blockAPIServer, err = pfs_server.NewBlockAPIServer(env.StorageRoot, blockCacheBytes, env.StorageBackend, net.JoinHostPort(env.EtcdHost, env.EtcdPort), false)
 			if err != nil {
 				return err
 			}
@@ -291,6 +293,7 @@ func doSidecarMode(config interface{}) (retErr error) {
 			treeCache,
 			env.StorageRoot,
 			memoryRequestBytes,
+			blockAPIServer,
 		)
 		if err != nil {
 			return err
@@ -519,6 +522,30 @@ func runFullMode(env *serviceenv.ServiceEnv, rt *localclient.Runtime) (retErr er
 	}
 	kubeNamespace := env.Namespace
 	requireNoncriticalServers := !env.RequireCriticalServersOnly
+	// Setup internal block gRPC server first so we can reference it from both the external and internal PFS gRPC servers.
+	internalServer, err := grpcutil.NewServer(context.Background(), false)
+	if err != nil {
+		return err
+	}
+	var blockAPIServer pfs_server.BlockAPIServer
+	if !env.StorageV2 {
+		blockCacheBytes, err := units.RAMInBytes(env.BlockCacheBytes)
+		if err != nil {
+			return errors.Wrapf(err, "units.RAMInBytes")
+		}
+		if err := logGRPCServerSetup("Block API", func() error {
+			var err error
+			blockAPIServer, err = pfs_server.NewBlockAPIServer(
+				env.StorageRoot, blockCacheBytes, env.StorageBackend, etcdAddress, false)
+			if err != nil {
+				return err
+			}
+			pfsclient.RegisterObjectAPIServer(internalServer.Server, blockAPIServer)
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
 	// Setup External Pachd GRPC Server.
 	externalServer, err := grpcutil.NewServer(context.Background(), true)
 	if err != nil {
@@ -532,7 +559,7 @@ func runFullMode(env *serviceenv.ServiceEnv, rt *localclient.Runtime) (retErr er
 		}
 		var pfsAPIServer pfs_server.APIServer
 		if err := logGRPCServerSetup("PFS API", func() error {
-			pfsAPIServer, err = pfs_server.NewAPIServer(env, txnEnv, path.Join(env.EtcdPrefix, env.PFSEtcdPrefix), treeCache, env.StorageRoot, memoryRequestBytes)
+			pfsAPIServer, err = pfs_server.NewAPIServer(env, txnEnv, path.Join(env.EtcdPrefix, env.PFSEtcdPrefix), treeCache, env.StorageRoot, memoryRequestBytes, blockAPIServer)
 			if err != nil {
 				return err
 			}
@@ -663,10 +690,6 @@ func runFullMode(env *serviceenv.ServiceEnv, rt *localclient.Runtime) (retErr er
 		return err
 	}
 	// Setup Internal Pachd GRPC Server.
-	internalServer, err := grpcutil.NewServer(context.Background(), false)
-	if err != nil {
-		return err
-	}
 	if err := logGRPCServerSetup("Internal Pachd", func() error {
 		txnEnv := &txnenv.TransactionEnv{}
 		cacheServer := cache_server.NewCacheServer(router, env.NumShards)
@@ -681,23 +704,6 @@ func runFullMode(env *serviceenv.ServiceEnv, rt *localclient.Runtime) (retErr er
 			}
 		}()
 		cache_pb.RegisterGroupCacheServer(internalServer.Server, cacheServer)
-		if !env.StorageV2 {
-			blockCacheBytes, err := units.RAMInBytes(env.BlockCacheBytes)
-			if err != nil {
-				return errors.Wrapf(err, "units.RAMInBytes")
-			}
-			if err := logGRPCServerSetup("Block API", func() error {
-				blockAPIServer, err := pfs_server.NewBlockAPIServer(
-					env.StorageRoot, blockCacheBytes, env.StorageBackend, etcdAddress, false)
-				if err != nil {
-					return err
-				}
-				pfsclient.RegisterObjectAPIServer(internalServer.Server, blockAPIServer)
-				return nil
-			}); err != nil {
-				return err
-			}
-		}
 		memoryRequestBytes, err := units.RAMInBytes(env.MemoryRequest)
 		if err != nil {
 			return err
@@ -711,6 +717,7 @@ func runFullMode(env *serviceenv.ServiceEnv, rt *localclient.Runtime) (retErr er
 				treeCache,
 				env.StorageRoot,
 				memoryRequestBytes,
+				blockAPIServer,
 			)
 			if err != nil {
 				return err
