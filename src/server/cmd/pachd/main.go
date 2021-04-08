@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"syscall"
 
-	"github.com/pachyderm/pachyderm/src/client"
 	adminclient "github.com/pachyderm/pachyderm/src/client/admin"
 	authclient "github.com/pachyderm/pachyderm/src/client/auth"
 	debugclient "github.com/pachyderm/pachyderm/src/client/debug"
@@ -883,9 +882,7 @@ func runFullMode(env *serviceenv.ServiceEnv, rt *localclient.Runtime) (retErr er
 		return githook.RunGitHookServer(address, etcdAddress, path.Join(env.EtcdPrefix, env.PPSEtcdPrefix))
 	})
 	go waitForError("S3 Server", errChan, requireNoncriticalServers, func() error {
-		server, err := s3.Server(env.S3GatewayPort, s3.NewMasterDriver(), func() (*client.APIClient, error) {
-			return client.NewFromAddress(fmt.Sprintf("localhost:%d", env.PeerPort))
-		})
+		server, err := s3.Server(env, s3.NewMasterDriver())
 		if err != nil {
 			return err
 		}
