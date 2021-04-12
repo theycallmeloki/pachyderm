@@ -53,6 +53,7 @@ import (
 	pps_server "github.com/pachyderm/pachyderm/src/server/pps/server"
 	"github.com/pachyderm/pachyderm/src/server/pps/server/githook"
 	txnserver "github.com/pachyderm/pachyderm/src/server/transaction/server"
+	"go.uber.org/automaxprocs/maxprocs"
 
 	etcd "github.com/coreos/etcd/clientv3"
 	units "github.com/docker/go-units"
@@ -79,6 +80,7 @@ func init() {
 
 func main() {
 	log.SetFormatter(logutil.FormatterFunc(logutil.Pretty))
+	maxprocs.Set(maxprocs.Logger(log.Printf))
 
 	switch {
 	case readiness:
