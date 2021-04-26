@@ -7732,7 +7732,8 @@ func TestPipelineBadImage(t *testing.T) {
 				return err
 			}
 			if pipelineInfo.State != pps.PipelineState_PIPELINE_CRASHING {
-				return errors.Errorf("pipeline %s should be in crashing", pipeline)
+				return errors.Errorf("pipeline %s should be in crashing, but is %q",
+					pipeline, pipelineInfo.State)
 			}
 			require.True(t, pipelineInfo.Reason != "")
 		}
