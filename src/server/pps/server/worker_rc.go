@@ -130,6 +130,9 @@ func (a *apiServer) workerPodSpec(options *workerOptions, pipelineInfo *pps.Pipe
 	}, {
 		Name:  "GC_PERCENT",
 		Value: strconv.FormatInt(int64(a.gcPercent), 10),
+	}, {
+		Name:  "METRICS",
+		Value: strconv.FormatBool(a.env.Metrics),
 	}}
 	sidecarEnv = append(sidecarEnv, assets.GetSecretEnvVars(a.storageBackend)...)
 	storageEnvVars, err := getStorageEnvVars(pipelineInfo)
@@ -194,6 +197,10 @@ func (a *apiServer) workerPodSpec(options *workerOptions, pipelineInfo *pps.Pipe
 		{
 			Name:  client.PeerPortEnv,
 			Value: strconv.FormatUint(uint64(a.peerPort), 10),
+		},
+		{
+			Name:  "METRICS",
+			Value: strconv.FormatBool(a.env.Metrics),
 		},
 	}...)
 	workerEnv = append(workerEnv, assets.GetSecretEnvVars(a.storageBackend)...)
