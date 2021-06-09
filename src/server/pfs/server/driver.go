@@ -2984,6 +2984,7 @@ func (d *driver) putFile(pachClient *client.APIClient, file *pfs.File, delimiter
 			if buffer.Len() != 0 &&
 				(headerReady || hitFileBytesLimit || hitFileDatumsLimit || noLimitsSet || EOF) {
 				_buffer := buffer
+				buffer = &bytes.Buffer{} // can't use .Reset() because _buffer is used asynchronously
 				if !headerDone /* implies headerReady || EOF */ {
 					header = _buffer.Bytes() // record header
 				} else {
@@ -2991,7 +2992,9 @@ func (d *driver) putFile(pachClient *client.APIClient, file *pfs.File, delimiter
 					_bufferLen := int64(_buffer.Len())
 					index := filesPut
 					filesPut++
-					d.memoryLimiter.Acquire(pachClient.Ctx(), _bufferLen)
+					if err := d.memoryLimiter.Acquire(pachClient.Ctx(), _bufferLen); err != nil {
+						return nil, err
+					}
 					d.putObjectLimiter.Acquire()
 					eg.Go(func() error {
 						defer d.putObjectLimiter.Release()
@@ -3009,7 +3012,6 @@ func (d *driver) putFile(pachClient *client.APIClient, file *pfs.File, delimiter
 						return nil
 					})
 				}
-				buffer = &bytes.Buffer{} // can't reset buffer b/c _buffer still in use
 				datumsWritten = 0
 				bytesWritten = 0
 			}
