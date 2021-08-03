@@ -740,16 +740,21 @@ func (d *driver) RunUserCode(
 	if d.uid != nil && d.gid != nil {
 		cmd.SysProcAttr = makeCmdCredentials(*d.uid, *d.gid)
 	}
-	// k8s workers default WorkingDir to the image's WORKDIR via docker
-	// inspection; local docker workers can't inspect (no socket), but the
-	// worker process's own cwd IS the image WORKDIR, so inherit it there.
-	workingDir := d.pipelineInfo.Transform.WorkingDir
-	if workingDir == "" && d.rootDir == "/" {
-		if wd, err := os.Getwd(); err == nil {
-			workingDir = wd
-		}
+<<<<<<< HEAD
+	// By default, the dockerfile will determine the working dir for the container, so if we
+	// couldn't read the container config with docker, don't touch it. If the pipeline or
+	// worker config explicitly sets the value, then override the container working dir.
+	if d.pipelineInfo.Transform.WorkingDir != "" || d.rootDir != "/" {
+		cmd.Dir = filepath.Join(d.rootDir, d.pipelineInfo.Transform.WorkingDir)
 	}
-	cmd.Dir = filepath.Join(d.rootDir, workingDir)
+=======
+	// By default, the dockerfile will determine the working dir for the container, so if we
+	// couldn't read the container config with docker, don't touch it. If the pipeline or
+	// worker config explicitly sets the value, then override the container working dir.
+	if d.pipelineInfo.Transform.WorkingDir != "" || d.rootDir != "/" {
+		cmd.Dir = filepath.Join(d.rootDir, d.pipelineInfo.Transform.WorkingDir)
+	}
+>>>>>>> 9e31ecc666 (Don't overwrite the default working dir unnecessarily (#6662))
 	err := cmd.Start()
 	if err != nil {
 		return errors.EnsureStack(err)
