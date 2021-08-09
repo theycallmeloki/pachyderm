@@ -985,7 +985,11 @@ $ {{alias}} foo@master^:XXX
 
 # get file "XXX" in the grandparent of the current head of branch "master"
 # in repo "foo"
-$ {{alias}} foo@master^2:XXX`,
+$ {{alias}} foo@master^2:XXX
+
+# get file "test[].txt" on branch "master" in repo "foo"
+# the path is interpreted as a glob pattern: quote and protect regex characters
+$ {{alias}} 'foo@master:/test\[\].txt'`,
 		Run: cmdutil.RunFixedArgs(1, func(args []string) error {
 			if !enableProgress {
 				progress.Disable()
@@ -1042,7 +1046,7 @@ $ {{alias}} foo@master^2:XXX`,
 	getFile.Flags().BoolVarP(&recursive, "recursive", "r", false, "Recursively download a directory.")
 	getFile.Flags().StringVarP(&outputPath, "output", "o", "", "The path where data will be downloaded.")
 	getFile.Flags().IntVarP(&parallelism, "parallelism", "p", DefaultParallelism, "The maximum number of files that can be downloaded in parallel")
-	getFile.Flags().BoolVar(&enableProgress, "progress", isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd()), "Don't print progress bars.")
+	getFile.Flags().BoolVar(&enableProgress, "progress", isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd()), "{true|false} Whether or not to print the progress bars.")
 	getFile.Flags().Int64Var(&offsetBytes, "offset", 0, "The number of bytes in the file to skip ahead when reading.")
 	getFile.Flags().BoolVar(&retry, "retry", false, "{true|false} Whether to append the missing bytes to an existing file. No-op if the file doesn't exist.")
 	shell.RegisterCompletionFunc(getFile, shell.FileCompletion)
@@ -1103,7 +1107,11 @@ $ {{alias}} foo@master^2
 $ {{alias}} foo@master --history n
 
 # list all versions of top-level files on branch "master" in repo "foo"
-$ {{alias}} foo@master --history all`,
+$ {{alias}} foo@master --history all
+
+# list file under directory "dir[1]" on branch "master" in repo "foo"
+# the path is interpreted as a glob pattern: quote and protect regex characters
+$ {{alias}} 'foo@master:dir\[1\]'`,
 		Run: cmdutil.RunFixedArgs(1, func(args []string) error {
 			file, err := cmdutil.ParseFile(args[0])
 			if err != nil {
