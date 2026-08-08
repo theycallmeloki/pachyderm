@@ -49,8 +49,9 @@ type ServiceEnv struct {
 	etcdEg errgroup.Group
 
 	// kubeClient is a kubernetes client that, if initialized, is shared by all
-	// users of this environment
-	kubeClient *kube.Clientset
+	// users of this environment. In local mode it is the in-process stand-in
+	// from the localclient package.
+	kubeClient kube.Interface
 	// kubeEg coordinates the initialization of kubeClient (see pachdEg)
 	kubeEg errgroup.Group
 
@@ -196,8 +197,9 @@ func (env *ServiceEnv) GetEtcdClient() *etcd.Client {
 }
 
 // GetKubeClient returns the already connected Kubernetes API client without
-// modification.
-func (env *ServiceEnv) GetKubeClient() *kube.Clientset {
+// modification. In local (k8s-free) mode this returns the in-process
+// stand-in installed by InstallLocalKube.
+func (env *ServiceEnv) GetKubeClient() kube.Interface {
 	if err := env.kubeEg.Wait(); err != nil {
 		panic(err) // If env can't connect, there's no sensible way to recover
 	}
@@ -205,6 +207,14 @@ func (env *ServiceEnv) GetKubeClient() *kube.Clientset {
 		panic("service env never connected to kubernetes")
 	}
 	return env.kubeClient
+}
+
+// InstallLocalKube installs an in-process Kubernetes API stand-in (used in
+// local mode) and marks the kube client as ready so that GetKubeClient
+// returns it.
+func (env *ServiceEnv) InstallLocalKube(client kube.Interface) {
+	env.kubeClient = client
+	env.kubeEg.Go(func() error { return nil })
 }
 
 // GetLokiClient returns the loki client, it doesn't require blocking on a

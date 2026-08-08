@@ -12,7 +12,9 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"os"
 	"path"
+	"strconv"
 
 	"github.com/pachyderm/pachyderm/src/client"
 	"github.com/pachyderm/pachyderm/src/client/pkg/errors"
@@ -84,7 +86,15 @@ func RunGitHookServer(address string, etcdAddress string, etcdPrefix string) err
 		etcdClient,
 		ppsdb.Pipelines(etcdClient, etcdPrefix),
 	}
-	return http.ListenAndServe(fmt.Sprintf(":%d", GitHookPort), s)
+	port := GitHookPort
+	if envPort := os.Getenv("GITHOOK_PORT"); envPort != "" {
+		p, err := strconv.Atoi(envPort)
+		if err != nil {
+			return errors.Wrapf(err, "invalid GITHOOK_PORT %q", envPort)
+		}
+		port = p
+	}
+	return http.ListenAndServe(fmt.Sprintf(":%d", port), s)
 }
 
 func matchingBranch(inputBranch string, payloadBranch string) bool {

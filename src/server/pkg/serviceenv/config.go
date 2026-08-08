@@ -51,7 +51,7 @@ type PachdSpecificConfiguration struct {
 	PFSEtcdPrefix              string `env:"PFS_ETCD_PREFIX,default=pachyderm_pfs"`
 	AuthEtcdPrefix             string `env:"PACHYDERM_AUTH_ETCD_PREFIX,default=pachyderm_auth"`
 	EnterpriseEtcdPrefix       string `env:"PACHYDERM_ENTERPRISE_ETCD_PREFIX,default=pachyderm_enterprise"`
-	KubeAddress                string `env:"KUBERNETES_PORT_443_TCP_ADDR,required"`
+	KubeAddress                string `env:"KUBERNETES_PORT_443_TCP_ADDR"`
 	Metrics                    bool   `env:"METRICS,default=true"`
 	Init                       bool   `env:"INIT,default=false"`
 	BlockCacheBytes            string `env:"BLOCK_CACHE_BYTES,default=1G"`
@@ -103,6 +103,11 @@ type WorkerSpecificConfiguration struct {
 	PPSPipelineName string `env:"PPS_PIPELINE_NAME,required"`
 	// The name of this pod
 	PodName string `env:"PPS_POD_NAME,required"`
+	// WorkerRoot overrides the filesystem root that the worker uses for its
+	// /pfs input directory and user-code working directory. In k8s deployments
+	// this is "/" (the pod's filesystem); in local mode the daemon points each
+	// worker at a private scratch directory.
+	WorkerRoot string `env:"PACH_WORKER_ROOT,default=/"`
 }
 
 // FeatureFlags contains the configuration for feature flags.  XXX: if you're

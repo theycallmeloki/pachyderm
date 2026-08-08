@@ -87,7 +87,7 @@ func do(config interface{}) error {
 
 	// Construct worker API server.
 	workerRcName := ppsutil.PipelineRcName(pipelineInfo.Pipeline.Name, pipelineInfo.Version)
-	workerInstance, err := worker.NewWorker(pachClient, env.GetEtcdClient(), env.PPSEtcdPrefix, pipelineInfo, env.PodName, env.Namespace, env.CacheRoot, "/")
+	workerInstance, err := worker.NewWorker(pachClient, env.GetEtcdClient(), env.PPSEtcdPrefix, pipelineInfo, env.PodName, env.Namespace, env.CacheRoot, env.WorkerRoot)
 	if err != nil {
 		return err
 	}
@@ -128,7 +128,11 @@ func do(config interface{}) error {
 	}
 
 	// If server ever exits, return error
-	if _, err := server.ListenTCP("", env.PPSWorkerPort); err != nil {
+	// Bind to the worker's own IP (rather than all interfaces) so that
+	// multiple workers can share a port on the same host: in k8s each worker
+	// pod has a distinct IP, and in local mode each worker is assigned a
+	// distinct 127.0.0.x loopback address.
+	if _, err := server.ListenTCP(env.PPSWorkerIP, env.PPSWorkerPort); err != nil {
 		return err
 	}
 	return server.Wait()

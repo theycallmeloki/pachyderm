@@ -2178,7 +2178,7 @@ func (a *apiServer) fixPipelineInputRepoACLsInTransaction(txnCtx *txnenv.Transac
 // getExpectedNumWorkers is a helper function for CreatePipeline that transforms
 // the parallelism spec in CreatePipelineRequest.Parallelism into a constant
 // that can be stored in EtcdPipelineInfo.Parallelism
-func getExpectedNumWorkers(kc *kube.Clientset, pipelineInfo *pps.PipelineInfo) (int, error) {
+func getExpectedNumWorkers(kc kube.Interface, pipelineInfo *pps.PipelineInfo) (int, error) {
 	switch pspec := pipelineInfo.ParallelismSpec; {
 	case pspec == nil, pspec.Constant == 0 && pspec.Coefficient == 0:
 		return 1, nil

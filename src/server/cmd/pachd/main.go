@@ -1,12 +1,15 @@
 package main
 
 import (
+	"os/signal"
+	"syscall"
 	gotls "crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"runtime/debug"
 	"runtime/pprof"
 	"strconv"
@@ -41,6 +44,8 @@ import (
 	col "github.com/pachyderm/pachyderm/src/server/pkg/collection"
 	"github.com/pachyderm/pachyderm/src/server/pkg/deploy/assets"
 	"github.com/pachyderm/pachyderm/src/server/pkg/hashtree"
+	"github.com/pachyderm/pachyderm/src/server/pkg/localclient"
+	"github.com/pachyderm/pachyderm/src/server/pkg/localetcd"
 	logutil "github.com/pachyderm/pachyderm/src/server/pkg/log"
 	"github.com/pachyderm/pachyderm/src/server/pkg/metrics"
 	"github.com/pachyderm/pachyderm/src/server/pkg/netutil"
@@ -84,9 +89,112 @@ func main() {
 		cmdutil.Main(doFullMode, &serviceenv.PachdFullConfiguration{})
 	case mode == "sidecar":
 		cmdutil.Main(doSidecarMode, &serviceenv.PachdFullConfiguration{})
+	case mode == "local":
+		runLocal()
 	default:
 		fmt.Printf("unrecognized mode: %s\n", mode)
 	}
+}
+
+// runLocal boots pachd in local (single-node, k8s-free) mode: it starts an
+// embedded etcd and sets the env vars that the required config fields
+// (ETCD_SERVICE_HOST/PORT) are loaded from, then runs the normal config
+// loading and hands off to doLocalMode.
+func runLocal() {
+	localDir := os.Getenv("PACH_LOCAL_DIR")
+	if localDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Printf("could not determine home directory: %v\n", err)
+			os.Exit(1)
+		}
+		localDir = filepath.Join(home, ".pachyderm-local")
+	}
+	if err := os.MkdirAll(localDir, 0700); err != nil {
+		fmt.Printf("could not create local data directory %q: %v\n", localDir, err)
+		os.Exit(1)
+	}
+	os.Setenv("PACH_LOCAL_DIR", localDir)
+
+	etcdPort := 2379
+	if port := os.Getenv("PACH_LOCAL_ETCD_PORT"); port != "" {
+		p, err := strconv.Atoi(port)
+		if err != nil {
+			fmt.Printf("invalid PACH_LOCAL_ETCD_PORT %q: %v\n", port, err)
+			os.Exit(1)
+		}
+		etcdPort = p
+	}
+	etcdEnv, err := localetcd.Start(filepath.Join(localDir, "etcd"), uint16(etcdPort))
+	if err != nil {
+		fmt.Printf("could not start embedded etcd: %v\n", err)
+		os.Exit(1)
+	}
+	defer etcdEnv.Close()
+	os.Setenv("ETCD_SERVICE_HOST", "127.0.0.1")
+	os.Setenv("ETCD_SERVICE_PORT", strconv.Itoa(etcdPort))
+	// PACHD_POD_NAME is normally injected by k8s' Downward API; give the
+	// daemon a stable name in local mode.
+	os.Setenv("PACHD_POD_NAME", "pachd-local")
+
+	// pachctl connects to 0.0.0.0:30650 by default, so serve the API there.
+	if os.Getenv("PORT") == "" {
+		os.Setenv("PORT", strconv.Itoa(grpcutil.DefaultPachdNodePort))
+	}
+	// Workers share one gRPC port (each binds its own loopback IP). Port 80
+	// requires root; pick a high port unless the user overrides it.
+	if os.Getenv("PPS_WORKER_GRPC_PORT") == "" {
+		os.Setenv("PPS_WORKER_GRPC_PORT", "1650")
+	}
+	// Use the filesystem object store rooted in the local data directory.
+	if os.Getenv("STORAGE_BACKEND") == "" {
+		os.Setenv("STORAGE_BACKEND", pfs_server.LocalBackendEnvVar)
+	}
+	// Pachyderm's default auxiliary ports (600-657) are below 1024 and some
+	// hosts block them even for unprivileged processes, so local mode remaps
+	// every one of them to the 306xx range.
+	if os.Getenv("HTTP_PORT") == "" {
+		os.Setenv("HTTP_PORT", "30652")
+	}
+	if os.Getenv("PEER_PORT") == "" {
+		os.Setenv("PEER_PORT", "30653")
+	}
+	if os.Getenv("SAML_PORT") == "" {
+		os.Setenv("SAML_PORT", "30654")
+	}
+	if os.Getenv("GITHOOK_PORT") == "" {
+		os.Setenv("GITHOOK_PORT", "30655")
+	}
+	if os.Getenv("PROMETHEUS_PORT") == "" {
+		os.Setenv("PROMETHEUS_PORT", "30656")
+	}
+	if os.Getenv("OIDC_PORT") == "" {
+		os.Setenv("OIDC_PORT", "30657")
+	}
+	if os.Getenv("S3GATEWAY_PORT") == "" {
+		os.Setenv("S3GATEWAY_PORT", "30600")
+	}
+	if os.Getenv("PACH_ROOT") == "" {
+		os.Setenv("PACH_ROOT", filepath.Join(localDir, "storage"))
+	}
+	if err := os.MkdirAll(os.Getenv("PACH_ROOT"), 0700); err != nil {
+		fmt.Printf("could not create storage root %q: %v\n", os.Getenv("PACH_ROOT"), err)
+		os.Exit(1)
+	}
+	// Workers talk to the daemon's external API server (there is no per-pod
+	// sidecar in local mode), so the object API must be served there too.
+	if os.Getenv("EXPOSE_OBJECT_API") == "" {
+		os.Setenv("EXPOSE_OBJECT_API", "true")
+	}
+	// These are normally injected by the k8s deployment; they are required by
+	// the worker pod spec construction.
+	if os.Getenv(assets.UploadConcurrencyLimitEnvVar) == "" {
+		os.Setenv(assets.UploadConcurrencyLimitEnvVar, strconv.Itoa(assets.DefaultUploadConcurrencyLimit))
+	}
+	if os.Getenv(assets.PutFileConcurrencyLimitEnvVar) == "" {
+		os.Setenv(assets.PutFileConcurrencyLimitEnvVar, strconv.Itoa(assets.DefaultPutFileConcurrencyLimit))
+	}
+	cmdutil.Main(doLocalMode, &serviceenv.PachdFullConfiguration{})
 }
 
 func doReadinessCheck(config interface{}) error {
@@ -282,6 +390,54 @@ func doFullMode(config interface{}) (retErr error) {
 			pprof.Lookup("goroutine").WriteTo(os.Stderr, 2)
 		}
 	}()
+	setPachdLogLevel()
+	env := serviceenv.InitWithKube(serviceenv.NewConfiguration(config))
+	return runFullMode(env)
+}
+
+// doLocalMode runs the full pachd server without Kubernetes: etcd is embedded
+// (started before config load in runLocal), storage is local, and pipeline
+// workers are spawned as processes by the in-process localclient runtime.
+func doLocalMode(config interface{}) (retErr error) {
+	defer func() {
+		if retErr != nil {
+			pprof.Lookup("goroutine").WriteTo(os.Stderr, 2)
+		}
+	}()
+	setPachdLogLevel()
+	env := serviceenv.InitServiceEnv(serviceenv.NewConfiguration(config))
+	workerBinary := os.Getenv("PACH_WORKER_BINARY")
+	if workerBinary == "" {
+		workerBinary = filepath.Join(filepath.Dir(os.Args[0]), "worker")
+	}
+	rt, err := localclient.NewRuntime(localclient.Options{
+		WorkerBinary: workerBinary,
+		EtcdHost:     env.EtcdHost,
+		EtcdPort:     env.EtcdPort,
+		PachdPort:    env.Port,
+		WorkerPort:   env.PPSWorkerPort,
+		LocalDir:     os.Getenv("PACH_LOCAL_DIR"),
+		StorageRoot:  env.StorageRoot,
+	})
+	if err != nil {
+		return errors.Wrapf(err, "could not start local worker runtime")
+	}
+	env.InstallLocalKube(localclient.NewClientset(rt))
+	// Kill worker processes when the daemon exits (normally or via signal), so
+	// they don't linger and hold their loopback IPs hostage for the next run.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		rt.Close()
+		os.Exit(0)
+	}()
+	return runFullMode(env)
+}
+
+// setPachdLogLevel applies the LOG_LEVEL env var to the logrus logger and
+// installs the Jaeger tracer if configured.
+func setPachdLogLevel() {
 	switch logLevel := os.Getenv("LOG_LEVEL"); logLevel {
 	case "debug":
 		log.SetLevel(log.DebugLevel)
@@ -293,13 +449,18 @@ func doFullMode(config interface{}) (retErr error) {
 		log.Errorf("Unrecognized log level %s, falling back to default of \"info\"", logLevel)
 		log.SetLevel(log.InfoLevel)
 	}
-	// must run InstallJaegerTracer before InitWithKube/pach client initialization
+	// must run InstallJaegerTracer before pach client initialization
 	if endpoint := tracing.InstallJaegerTracerFromEnv(); endpoint != "" {
 		log.Printf("connecting to Jaeger at %q", endpoint)
 	} else {
 		log.Printf("no Jaeger collector found (JAEGER_COLLECTOR_SERVICE_HOST not set)")
 	}
-	env := serviceenv.InitWithKube(serviceenv.NewConfiguration(config))
+}
+
+// runFullMode sets up and runs every pachd server (external gRPC, internal
+// gRPC, HTTP, githook, S3 gateway, prometheus). It is shared by k8s mode
+// (doFullMode) and local mode (doLocalMode).
+func runFullMode(env *serviceenv.ServiceEnv) (retErr error) {
 	debug.SetGCPercent(env.GCPercent)
 	if env.EtcdPrefix == "" {
 		env.EtcdPrefix = col.DefaultPrefix
@@ -730,8 +891,16 @@ func doFullMode(config interface{}) (retErr error) {
 		return server.ListenAndServeTLS(certPath, keyPath)
 	})
 	go waitForError("Prometheus Server", errChan, requireNoncriticalServers, func() error {
+		promPort := assets.PrometheusPort
+		if envPort := os.Getenv("PROMETHEUS_PORT"); envPort != "" {
+			p, err := strconv.Atoi(envPort)
+			if err != nil {
+				return errors.Wrapf(err, "invalid PROMETHEUS_PORT %q", envPort)
+			}
+			promPort = p
+		}
 		http.Handle("/metrics", promhttp.Handler())
-		return http.ListenAndServe(fmt.Sprintf(":%v", assets.PrometheusPort), nil)
+		return http.ListenAndServe(fmt.Sprintf(":%v", promPort), nil)
 	})
 	return <-errChan
 }

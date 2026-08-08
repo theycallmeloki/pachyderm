@@ -879,7 +879,7 @@ func (a *apiServer) checkOrDeployGithookService() error {
 	return nil
 }
 
-func getGithookService(kubeClient *kube.Clientset, namespace string) (*v1.Service, error) {
+func getGithookService(kubeClient kube.Interface, namespace string) (*v1.Service, error) {
 	labels := map[string]string{
 		"app":   "githook",
 		"suite": suite,
