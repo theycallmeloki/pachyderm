@@ -115,6 +115,12 @@ func runLocal() {
 		os.Exit(1)
 	}
 	os.Setenv("PACH_LOCAL_DIR", localDir)
+	// Explicit local-mode marker: in local mode DeleteAll must not sweep
+	// secrets (the pps Secret API is the only way to create them, so every
+	// secret carries the pachyderm-user tag and DeleteAll would otherwise
+	// remove secrets that raw-kubectl-created secrets on a real cluster
+	// would keep).
+	os.Setenv("PACH_LOCAL_MODE", "1")
 
 	etcdPort := 2379
 	if port := os.Getenv("PACH_LOCAL_ETCD_PORT"); port != "" {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"path"
 	"path/filepath"
 	"sort"
@@ -3757,10 +3758,17 @@ func (a *apiServer) DeleteAll(ctx context.Context, request *types.Empty) (respon
 		return nil, err
 	}
 
-	if err := a.env.GetKubeClient().CoreV1().Secrets(a.namespace).DeleteCollection(&metav1.DeleteOptions{}, metav1.ListOptions{
-		LabelSelector: "secret-source=pachyderm-user",
-	}); err != nil {
-		return nil, err
+	// Only sweep pachyderm-tagged secrets on a real cluster: in local mode
+	// the pps Secret API is the only way to create secrets, so every secret
+	// carries the pachyderm-user tag and a DeleteAll would remove secrets
+	// that raw-kubectl-created secrets on a real cluster would keep (the
+	// test suite depends on that distinction).
+	if os.Getenv("PACH_LOCAL_MODE") != "1" {
+		if err := a.env.GetKubeClient().CoreV1().Secrets(a.namespace).DeleteCollection(&metav1.DeleteOptions{}, metav1.ListOptions{
+			LabelSelector: "secret-source=pachyderm-user",
+		}); err != nil {
+			return nil, err
+		}
 	}
 
 	// PFS doesn't delete the spec repo, so do it here

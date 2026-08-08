@@ -17,6 +17,28 @@
 //   - Nodes reports a single node, so COEFFICIENT parallelism resolves to the
 //     configured constant.
 //
+// # Suite gating (src/server/pachyderm_test.go vs local mode)
+//
+// Most of the 165-test suite runs against local mode (docker-mode workers
+// restore absolute /pfs paths). Permanently gated tests fall into buckets:
+//
+//   - k8s API reflection: assert on pod/service spec rendering via
+//     tu.GetKubeClient, which local mode serves from an empty in-memory fake
+//     (TestPipelineResourceLimit*, TestPipelineResourceRequest,
+//     TestSystemResourceRequests, TestPodOpts, TestPodPatchUnmarshalling,
+//     TestMissingPipelineSpec, TestNoOutputRepoDoesntCrashPPSMaster,
+//     TestUpdatePipeline).
+//   - k8s scheduling semantics: TestPipelineCrashing (GPU), TestCrashingToStandby.
+//   - auth/enterprise/spout/service: TestSecretsUnauthenticated, TestAuth*,
+//     TestEnterprise*, TestService*, TestSpout* (auth disabled / not ported).
+//   - environment: cron RunCron* (upstream bug: cron file paths embed the
+//     machine timezone offset, which PFS path validation rejects), TestPipelineEnv
+//     is fixed (see below).
+//
+// RUN_BAD_TESTS-gated upstream: TestPipelineFailure, TestGetLogsWithStats,
+// TestChainedPipelinesNoDelay, TestPipelineWithStats*, TestListJobOutput,
+// TestUpdateFailedPipeline.
+//
 // All other API groups are served by the client-go fake clientset.
 package localclient
 
@@ -580,7 +602,11 @@ func (rt *Runtime) workerCmd(g *rcState, name, ip string, env []string) (*exec.C
 		"run", "--rm",
 		"--name", name,
 		"--network", "host",
-		"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
+		// Run as the image's default user (usually root): the worker
+		// resolves Transform.User against the container's /etc/passwd and
+		// drops to that user (chowning inputs) around user code, which
+		// requires the worker itself to be root. Root also bypasses the
+		// 0700 daemon-owned storage and scratch dirs.
 		"--label", "pach-local=worker",
 		"-v", scratch + ":/pfs",
 		"-v", cacheDir + ":/pach-cache",
@@ -595,11 +621,62 @@ func (rt *Runtime) workerCmd(g *rcState, name, ip string, env []string) (*exec.C
 	if _, err := os.Stat("/etc/ssl/certs/ca-certificates.crt"); err == nil {
 		args = append(args, "-v", "/etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro")
 	}
+	// Secret volume mounts (transform.Secrets with a MountPath): materialize
+	// each secret's data as files and bind them read-only into the container.
+	// The storage-backend secret and spout pachctl secret are deployment
+	// plumbing, not pipeline secrets - skip them (they are never created in
+	// local mode).
+	podSpec := g.rc.Spec.Template.Spec
+	var userMounts []v1.VolumeMount
+	for _, c := range podSpec.Containers {
+		if c.Name == client.PPSWorkerUserContainerName {
+			userMounts = c.VolumeMounts
+		}
+	}
+	for _, vm := range userMounts {
+		for _, vol := range podSpec.Volumes {
+			if vol.Name != vm.Name || vol.Secret == nil {
+				continue
+			}
+			if vol.Secret.SecretName == client.StorageSecretName ||
+				strings.HasPrefix(vol.Secret.SecretName, "spout-pachctl-secret-") {
+				continue
+			}
+			hostDir := filepath.Join(rt.opts.LocalDir, "secrets", vol.Secret.SecretName)
+			if err := rt.materializeSecret(g.ns, vol.Secret.SecretName, hostDir); err != nil {
+				return nil, err
+			}
+			args = append(args, "-v", hostDir+":"+vm.MountPath+":ro")
+		}
+	}
 	for _, e := range env {
 		args = append(args, "-e", e)
 	}
-	args = append(args, image, "/pach-bin/worker")
+	// --entrypoint overrides the image's ENTRYPOINT (e.g. the test
+	// entrypoint image's `cp ...`); the worker binary is the process.
+	args = append(args, "--entrypoint", "/pach-bin/worker", image)
 	return exec.Command(rt.dockerBin, args...), nil
+}
+
+// materializeSecret writes a secret's data as files under dir (one file per
+// key), so the worker container can bind-mount them at the pipeline's
+// MountPath. It fails if the secret is absent, matching k8s's
+// CreateContainerConfigError for a missing secret. Callers must hold rt.mu
+// (it is invoked from workerCmd under the spawn lock, like resolveEnv).
+func (rt *Runtime) materializeSecret(ns, name, dir string) error {
+	secret, ok := rt.secrets[ns+"/"+name]
+	if !ok {
+		return errors.Errorf("secret %q not found while mounting secret volume", name)
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return errors.EnsureStack(err)
+	}
+	for k, v := range secret.Data {
+		if err := ioutil.WriteFile(filepath.Join(dir, k), v, 0644); err != nil {
+			return errors.EnsureStack(err)
+		}
+	}
+	return nil
 }
 
 // preflightImage ensures the worker's image is available before spawning:
@@ -1351,6 +1428,14 @@ func (rt *Runtime) createSecret(ns string, secret *v1.Secret) (*v1.Secret, error
 	key := ns + "/" + secret.Name
 	if _, ok := rt.secrets[key]; ok {
 		return nil, kubeerrors.NewAlreadyExists(schema.GroupResource{Group: "", Resource: "secrets"}, secret.Name)
+	}
+	// The k8s API server defaults an unset type to Opaque and fills in the
+	// namespace from the request.
+	if secret.Type == "" {
+		secret.Type = v1.SecretTypeOpaque
+	}
+	if secret.Namespace == "" {
+		secret.Namespace = ns
 	}
 	rt.secrets[key] = secret.DeepCopy()
 	return rt.secrets[key].DeepCopy(), nil
