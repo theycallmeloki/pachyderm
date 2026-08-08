@@ -20,24 +20,30 @@
 // # Suite gating (src/server/pachyderm_test.go vs local mode)
 //
 // Most of the 165-test suite runs against local mode (docker-mode workers
-// restore absolute /pfs paths). Permanently gated tests fall into buckets:
+// restore absolute /pfs paths). The full-suite baseline is green in one
+// invocation (143 pass / 26 skip / 0 fail). Permanently gated tests fall
+// into buckets, each skipped via tu.LocalMode():
 //
-//   - k8s API reflection: assert on pod/service spec rendering via
-//     tu.GetKubeClient, which local mode serves from an empty in-memory fake
-//     (TestPipelineResourceLimit*, TestPipelineResourceRequest,
-//     TestSystemResourceRequests, TestPodOpts, TestPodPatchUnmarshalling,
-//     TestMissingPipelineSpec, TestNoOutputRepoDoesntCrashPPSMaster,
-//     TestUpdatePipeline).
+//   - k8s API reflection: assert on pod/service/deployment spec rendering
+//     via tu.GetKubeClient, which local mode serves from an empty in-memory
+//     fake (TestPipelineResourceLimit, TestPipelineResourceLimitDefaults,
+//     TestPipelineResourceRequest, TestSystemResourceRequests, TestPodOpts,
+//     TestPodPatchUnmarshalling, TestMissingPipelineSpec,
+//     TestNoOutputRepoDoesntCrashPPSMaster, TestUpdatePipeline).
 //   - k8s scheduling semantics: TestPipelineCrashing (GPU), TestCrashingToStandby.
-//   - auth/enterprise/spout/service: TestSecretsUnauthenticated, TestAuth*,
-//     TestEnterprise*, TestService*, TestSpout* (auth disabled / not ported).
-//   - environment: cron RunCron* (upstream bug: cron file paths embed the
-//     machine timezone offset, which PFS path validation rejects), TestPipelineEnv
-//     is fixed (see below).
+//   - auth/enterprise: TestSecretsUnauthenticated, TestLokiLogs (enterprise
+//     activation), and the spout auth subtests (auth disabled in local mode).
+//   - pipeline services: TestService, TestServiceEnvVars, TestUpdatePipeline,
+//     and the ServiceSpout spout subtest (no service ports in local mode).
+//   - environment: TestCronPipeline (upstream bug: cron file paths embed the
+//     machine timezone offset, which PFS path validation rejects).
 //
-// RUN_BAD_TESTS-gated upstream: TestPipelineFailure, TestGetLogsWithStats,
+// RUN_BAD_TESTS-gated upstream (these all run and pass in local mode when
+// RUN_BAD_TESTS is set): TestPipelineFailure, TestGetLogsWithStats,
 // TestChainedPipelinesNoDelay, TestPipelineWithStats*, TestListJobOutput,
-// TestUpdateFailedPipeline.
+// TestUpdateFailedPipeline, TestDatumStatusRestart, TestGarbageCollection,
+// TestPipelineVersions, TestDeferredProcessing, TestPipelineHistory,
+// TestKeepRepo, TestStatsDeleteAll, TestPipelineWithGitInputMultiPipeline*.
 //
 // All other API groups are served by the client-go fake clientset.
 package localclient
@@ -340,19 +346,20 @@ func (rt *Runtime) forgetPID(pid int) {
 }
 
 // allocIP returns the next free 127.0.0.x address, probing that nothing else
-// is already bound to ip:workerPort.
+// is already bound to ip:workerPort. Loopback addresses are released when
+// workers die, so once the counter passes 254 it wraps back to .2: the probe
+// skips any address a live worker still holds.
 func (rt *Runtime) allocIP() string {
 	for {
+		if rt.nextIP > 254 {
+			rt.nextIP = 2
+		}
 		ip := fmt.Sprintf("127.0.0.%d", rt.nextIP)
 		rt.nextIP++
 		ln, err := net.Listen("tcp", net.JoinHostPort(ip, strconv.Itoa(int(rt.opts.WorkerPort))))
 		if err == nil {
 			ln.Close()
 			return ip
-		}
-		if rt.nextIP > 254 {
-			log.Errorf("localclient: ran out of loopback IPs for workers")
-			return ip // let the spawn fail loudly
 		}
 	}
 }
@@ -641,6 +648,13 @@ func (rt *Runtime) workerCmd(g *rcState, name, ip string, env []string) (*exec.C
 	// current CA bundle; base images ship stale or no roots.
 	if _, err := os.Stat("/etc/ssl/certs/ca-certificates.crt"); err == nil {
 		args = append(args, "-v", "/etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro")
+	}
+	// The worker recovers the image's ENTRYPOINT/USER/WORKDIR for empty
+	// transform fields via docker inspection, exactly like a k8s worker pod
+	// (which has the dockerd sidecar's socket); mount the host socket so the
+	// same fallback works here.
+	if _, err := os.Stat("/var/run/docker.sock"); err == nil {
+		args = append(args, "-v", "/var/run/docker.sock:/var/run/docker.sock")
 	}
 	// Secret volume mounts (transform.Secrets with a MountPath): materialize
 	// each secret's data as files and bind them read-only into the container.

@@ -2961,6 +2961,9 @@ func TestUpdatePipeline(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
 	}
+	if tu.LocalMode() {
+		t.Skip("pipeline services are not supported in local mode")
+	}
 
 	c := tu.GetPachClient(t)
 	require.NoError(t, c.DeleteAll())
@@ -4768,6 +4771,9 @@ func TestLokiLogs(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
 	}
+	if tu.LocalMode() {
+		t.Skip("enterprise activation is not supported in local mode")
+	}
 	c := tu.GetPachClient(t)
 	require.NoError(t, c.DeleteAll())
 	_, err := c.Enterprise.Activate(context.Background(),
@@ -5023,6 +5029,9 @@ func TestSystemResourceRequests(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
 	}
+	if tu.LocalMode() {
+		t.Skip("k8s pod specs are not served in local mode")
+	}
 	kubeClient := tu.GetKubeClient(t)
 
 	// Expected resource requests for pachyderm system pods:
@@ -5080,6 +5089,9 @@ func TestSystemResourceRequests(t *testing.T) {
 func TestPipelineResourceRequest(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
+	}
+	if tu.LocalMode() {
+		t.Skip("k8s pod specs are not served in local mode")
 	}
 
 	c := tu.GetPachClient(t)
@@ -5153,6 +5165,9 @@ func TestPipelineResourceLimit(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
 	}
+	if tu.LocalMode() {
+		t.Skip("k8s pod specs are not served in local mode")
+	}
 
 	c := tu.GetPachClient(t)
 	require.NoError(t, c.DeleteAll())
@@ -5220,6 +5235,9 @@ func TestPipelineResourceLimit(t *testing.T) {
 func TestPipelineResourceLimitDefaults(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
+	}
+	if tu.LocalMode() {
+		t.Skip("k8s pod specs are not served in local mode")
 	}
 
 	c := tu.GetPachClient(t)
@@ -5359,6 +5377,9 @@ func TestPipelineCrashing(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
 	}
+	if tu.LocalMode() {
+		t.Skip("GPU scheduling semantics are not available in local mode")
+	}
 
 	c := tu.GetPachClient(t)
 	require.NoError(t, c.DeleteAll())
@@ -5406,6 +5427,9 @@ func TestPipelineCrashing(t *testing.T) {
 func TestPodOpts(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
+	}
+	if tu.LocalMode() {
+		t.Skip("k8s pod specs are not served in local mode")
 	}
 
 	c := tu.GetPachClient(t)
@@ -7375,6 +7399,9 @@ func TestCronPipeline(t *testing.T) {
 	if os.Getenv("RUN_BAD_TESTS") == "" {
 		t.Skip("Skipping because RUN_BAD_TESTS was empty")
 	}
+	if tu.LocalMode() {
+		t.Skip("upstream cron bug: cron file paths embed the machine timezone offset, which PFS path validation rejects")
+	}
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
 	}
@@ -8216,6 +8243,9 @@ func TestService(t *testing.T) {
 	if os.Getenv("RUN_BAD_TESTS") == "" {
 		t.Skip("Skipping because RUN_BAD_TESTS was empty")
 	}
+	if tu.LocalMode() {
+		t.Skip("pipeline services are not supported in local mode")
+	}
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
 	}
@@ -8376,6 +8406,9 @@ func TestService(t *testing.T) {
 func TestServiceEnvVars(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
+	}
+	if tu.LocalMode() {
+		t.Skip("pipeline services are not supported in local mode")
 	}
 	c := tu.GetPachClient(t)
 	require.NoError(t, c.DeleteAll())
@@ -12076,6 +12109,9 @@ func TestPipelineHistory(t *testing.T) {
 }
 
 func TestMissingPipelineSpec(t *testing.T) {
+	if tu.LocalMode() {
+		t.Skip("k8s deployments are not served in local mode")
+	}
 	c := tu.GetPachClient(t)
 	require.NoError(t, c.DeleteAll())
 	// create repos
@@ -12237,6 +12273,9 @@ func TestFileHistory(t *testing.T) {
 func TestNoOutputRepoDoesntCrashPPSMaster(t *testing.T) {
 	if os.Getenv("RUN_BAD_TESTS") == "" {
 		t.Skip("Skipping because RUN_BAD_TESTS was empty")
+	}
+	if tu.LocalMode() {
+		t.Skip("k8s pod state is not served in local mode")
 	}
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
@@ -12574,6 +12613,9 @@ func TestPodPatchUnmarshalling(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
 	}
+	if tu.LocalMode() {
+		t.Skip("k8s pod specs are not served in local mode")
+	}
 
 	c := tu.GetPachClient(t)
 	require.NoError(t, c.DeleteAll())
@@ -12702,6 +12744,9 @@ func TestSecrets(t *testing.T) {
 func TestSecretsUnauthenticated(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
+	}
+	if tu.LocalMode() {
+		t.Skip("auth is not enabled in local mode")
 	}
 
 	// Enable auth on the cluster
@@ -12975,6 +13020,9 @@ func TestKeepRepo(t *testing.T) {
 func TestCrashingToStandby(t *testing.T) {
 	if os.Getenv("RUN_BAD_TESTS") == "" {
 		t.Skip("Skipping because RUN_BAD_TESTS was empty")
+	}
+	if tu.LocalMode() {
+		t.Skip("k8s scheduling semantics are not available in local mode")
 	}
 
 	if testing.Short() {

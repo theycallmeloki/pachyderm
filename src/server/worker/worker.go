@@ -61,10 +61,13 @@ func NewWorker(
 	if _, err := os.Stat("/var/run/docker.sock"); err != nil {
 		hasDocker = false
 	}
-	// In local mode user code runs directly on the host, so the transform
-	// image (and its metadata) is irrelevant; skip inspecting it so that
-	// pipelines with images the host doesn't have still run.
-	if os.Getenv("PACH_LOCAL_WORKER") == "1" {
+	// In local process mode user code runs directly on the host, so the
+	// transform image (and its metadata) is irrelevant; skip inspecting it
+	// so that pipelines with images the host doesn't have still run. In
+	// local docker mode the worker runs in the pipeline's image with the
+	// docker socket mounted, so the k8s fallbacks (entrypoint, user,
+	// working dir) work as they do in a real pod.
+	if os.Getenv("PACH_LOCAL_WORKER") == "1" && os.Getenv("PACH_WORKER_ROOT") != "/" {
 		hasDocker = false
 	}
 
