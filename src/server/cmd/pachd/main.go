@@ -162,6 +162,8 @@ func runLocal() {
 	if os.Getenv("SAML_PORT") == "" {
 		os.Setenv("SAML_PORT", "30654")
 	}
+	// The fork's GitHookPort is 655, so the githook is reached at
+	// GitHookPort+30000 = 30655 by pachctl and the test suite.
 	if os.Getenv("GITHOOK_PORT") == "" {
 		os.Setenv("GITHOOK_PORT", "30655")
 	}
@@ -418,6 +420,8 @@ func doLocalMode(config interface{}) (retErr error) {
 		WorkerPort:   env.PPSWorkerPort,
 		LocalDir:     os.Getenv("PACH_LOCAL_DIR"),
 		StorageRoot:  env.StorageRoot,
+		Runtime:      os.Getenv("PACH_WORKER_RUNTIME"),
+		DaemonPodName: env.PachdPodName,
 	})
 	if err != nil {
 		return errors.Wrapf(err, "could not start local worker runtime")

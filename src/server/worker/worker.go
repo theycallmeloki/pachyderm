@@ -61,6 +61,12 @@ func NewWorker(
 	if _, err := os.Stat("/var/run/docker.sock"); err != nil {
 		hasDocker = false
 	}
+	// In local mode user code runs directly on the host, so the transform
+	// image (and its metadata) is irrelevant; skip inspecting it so that
+	// pipelines with images the host doesn't have still run.
+	if os.Getenv("PACH_LOCAL_WORKER") == "1" {
+		hasDocker = false
+	}
 
 	driver, err := driver.NewDriver(
 		pipelineInfo,
@@ -98,6 +104,15 @@ func NewWorker(
 			}
 			pipelineInfo.Transform.Cmd = image.Config.Entrypoint
 		}
+	}
+	// Without docker there is no image to recover an entrypoint from, so a
+	// missing transform.cmd is a hard pipeline error (k8s workers always have
+	// the docker socket and fail via the entrypoint check above).
+	if pipelineInfo.Transform.Cmd == nil && !hasDocker {
+		ppsutil.FailPipeline(pachClient.Ctx(), etcdClient, driver.Pipelines(),
+			pipelineInfo.Pipeline.Name,
+			"nothing to run: no transform.cmd and no docker to inspect an entrypoint")
+		return nil, errors.New("nothing to run: no transform.cmd and no docker to inspect an entrypoint")
 	}
 
 	worker := &Worker{

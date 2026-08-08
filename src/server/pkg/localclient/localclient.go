@@ -21,6 +21,7 @@
 package localclient
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -44,6 +45,7 @@ import (
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes/fake"
@@ -78,6 +80,15 @@ type Options struct {
 	// LocalDir is the daemon's data directory. Worker scratch space and logs
 	// live under it.
 	LocalDir string
+	// Runtime selects how workers are run: "process" (default) spawns the
+	// worker binary directly on the host; "docker" runs each worker as a
+	// container of the pipeline's image with its scratch mounted at /pfs,
+	// restoring k8s-style absolute /pfs paths in user code.
+	Runtime string
+	// DaemonPodName is the name local mode uses for the pachd "pod" (from
+	// PACHD_POD_NAME). The debug server and unqualified log queries look
+	// pods up under this name.
+	DaemonPodName string
 }
 
 // Clientset is a kubernetes.Interface whose CoreV1 resources are backed by a
@@ -109,6 +120,9 @@ type Runtime struct {
 	nextWatch int
 
 	logSrv *httptest.Server
+
+	// dockerBin is the resolved docker CLI path, set when Runtime is docker.
+	dockerBin string
 }
 
 type rcState struct {
@@ -123,6 +137,11 @@ type podState struct {
 	cmd     *exec.Cmd
 	logPath string
 	group   *rcState
+
+	// spawnFailed is set when the pod could not be started at all (as
+	// opposed to started and then exited); it selects the failure reason
+	// the pipeline controller recognizes (CreateContainerConfigError).
+	spawnFailed bool
 
 	mu       sync.Mutex
 	exitErr  error
@@ -142,6 +161,12 @@ func NewRuntime(opts Options) (*Runtime, error) {
 	if opts.WorkerBinary == "" {
 		return nil, errors.New("localclient: WorkerBinary is required")
 	}
+	if opts.Runtime == "" {
+		opts.Runtime = "process"
+	}
+	if opts.Runtime != "process" && opts.Runtime != "docker" {
+		return nil, errors.Errorf("localclient: unknown Runtime %q (want \"process\" or \"docker\")", opts.Runtime)
+	}
 	rt := &Runtime{
 		opts:     opts,
 		rcs:      make(map[string]*rcState),
@@ -150,6 +175,13 @@ func NewRuntime(opts Options) (*Runtime, error) {
 		nextIP:   2, // 127.0.0.1 is the daemon itself; workers start at 127.0.0.2
 		watchers: make(map[int]chan watch.Event),
 	}
+	if opts.Runtime == "docker" {
+		bin, err := exec.LookPath("docker")
+		if err != nil {
+			return nil, errors.Wrap(err, "localclient: docker runtime requires the docker CLI")
+		}
+		rt.dockerBin = bin
+	}
 	for _, dir := range []string{
 		filepath.Join(opts.LocalDir, "workers"),
 		filepath.Join(opts.LocalDir, "logs"),
@@ -157,6 +189,60 @@ func NewRuntime(opts Options) (*Runtime, error) {
 		if err := os.MkdirAll(dir, 0777); err != nil {
 			return nil, errors.Wrapf(err, "could not create %q", dir)
 		}
+	}
+	// Seed a synthetic "pachd" pod so that unqualified log queries (GetLogs
+	// with no pipeline/job, i.e. `pachctl logs`) resolve to the daemon.
+	pachdLog := filepath.Join(opts.LocalDir, "logs", "pachd.jsonl")
+	if f, err := os.OpenFile(pachdLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err == nil {
+		f.Close()
+	}
+	pachdRC := &rcState{
+		rc: &v1.ReplicationController{
+			ObjectMeta: metav1.ObjectMeta{Name: "pachd"},
+			Spec: v1.ReplicationControllerSpec{
+				Template: &v1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{"app": "pachd", "suite": "pachyderm"},
+					},
+				},
+			},
+		},
+		ns: "default",
+	}
+	pachdRC.pods = []*podState{{
+		name:    "pachd",
+		ip:      "127.0.0.1",
+		logPath: pachdLog,
+		group:   pachdRC,
+	}}
+	rt.rcs["default/pachd"] = pachdRC
+	// The debug server reads the daemon's own logs under its pod name
+	// (PACHD_POD_NAME); mirror it as a second pod sharing the same file.
+	if opts.DaemonPodName != "" && opts.DaemonPodName != "pachd" {
+		daemonLog := filepath.Join(opts.LocalDir, "logs", opts.DaemonPodName+".jsonl")
+		if f, err := os.OpenFile(daemonLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err == nil {
+			f.Close()
+		}
+		daemonRC := &rcState{
+			rc: &v1.ReplicationController{
+				ObjectMeta: metav1.ObjectMeta{Name: opts.DaemonPodName},
+				Spec: v1.ReplicationControllerSpec{
+					Template: &v1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: map[string]string{"app": opts.DaemonPodName, "suite": "pachyderm"},
+						},
+					},
+				},
+			},
+			ns: "default",
+		}
+		daemonRC.pods = []*podState{{
+			name:    opts.DaemonPodName,
+			ip:      "127.0.0.1",
+			logPath: daemonLog,
+			group:   daemonRC,
+		}}
+		rt.rcs["default/"+opts.DaemonPodName] = daemonRC
 	}
 	rt.reapOrphanedWorkers()
 	rt.logSrv = httptest.NewServer(http.HandlerFunc(rt.handleLogs))
@@ -183,6 +269,21 @@ func (rt *Runtime) reapOrphanedWorkers() {
 			strings.Contains(string(cmdline), "worker") {
 			syscall.Kill(pid, syscall.SIGKILL)
 			log.Infof("localclient: reaped orphaned worker %d", pid)
+		}
+	}
+	// In docker mode, a hard-killed daemon also leaves containers behind (the
+	// docker CLI wrapper is dead, so the pid file cannot name them); remove
+	// every container we have ever labelled.
+	if rt.opts.Runtime == "docker" {
+		out, err := exec.Command(rt.dockerBin, "ps", "-aq", "--filter", "label=pach-local=worker").Output()
+		if err != nil {
+			log.Warnf("localclient: could not list orphaned worker containers: %v", err)
+			return
+		}
+		for _, id := range strings.Fields(string(out)) {
+			if err := exec.Command(rt.dockerBin, "rm", "-f", id).Run(); err != nil {
+				log.Warnf("localclient: could not remove orphaned container %s: %v", id, err)
+			}
 		}
 	}
 }
@@ -411,6 +512,122 @@ func (rt *Runtime) reconcileLocked(g *rcState) {
 	}
 }
 
+// workerEnv computes the environment for a worker replica, overriding the k8s
+// Downward API and k8s-injected service env vars with local values. In docker
+// mode the scratch dir is mounted at /pfs and the daemon's storage root at
+// /pach, and the worker runs with rootPath "/" exactly as in a k8s pod.
+func (rt *Runtime) workerEnv(g *rcState, name, ip string) ([]string, error) {
+	template := &g.rc.Spec.Template.Spec
+	var userEnv []v1.EnvVar
+	for _, c := range template.Containers {
+		if c.Name == client.PPSWorkerUserContainerName {
+			userEnv = c.Env
+		}
+	}
+	env, err := rt.resolveEnv(g.ns, name, ip, userEnv)
+	if err != nil {
+		return nil, err
+	}
+	env = setEnv(env, "PPS_WORKER_IP", ip)
+	env = setEnv(env, "PPS_POD_NAME", name)
+	env = setEnv(env, "PPS_WORKER_GRPC_PORT", strconv.Itoa(int(rt.opts.WorkerPort)))
+	env = setEnv(env, "PEER_PORT", strconv.Itoa(int(rt.opts.PachdPort)))
+	env = setEnv(env, "ETCD_SERVICE_HOST", rt.opts.EtcdHost)
+	env = setEnv(env, "ETCD_SERVICE_PORT", rt.opts.EtcdPort)
+	if rt.opts.Runtime == "docker" {
+		env = setEnv(env, "PACH_WORKER_ROOT", "/")
+		// The cache must live outside /pfs: the worker unlinks every entry of
+		// the input dir between datums (k8s keeps the cache on a separate
+		// emptyDir volume for the same reason).
+		env = setEnv(env, "PACH_CACHE_ROOT", "/pach-cache")
+		// PACH_ROOT must be the same absolute path the daemon uses: the
+		// worker sends block paths to the daemon's object API verbatim
+		// (DirectObjWriter), and the local backend resolves them as-is.
+		env = setEnv(env, "PACH_ROOT", rt.opts.StorageRoot)
+	} else {
+		scratch := filepath.Join(rt.opts.LocalDir, "workers", name)
+		env = setEnv(env, "PACH_WORKER_ROOT", scratch)
+		env = setEnv(env, "PACH_CACHE_ROOT", filepath.Join(scratch, "cache"))
+		env = setEnv(env, "PACH_ROOT", rt.opts.StorageRoot)
+	}
+	env = append(env, "PACH_LOCAL_WORKER=1")
+	return env, nil
+}
+
+// workerCmd builds the command that runs one worker replica. In process mode
+// it is the worker binary itself; in docker mode it is `docker run` with the
+// pipeline's image, the scratch dir mounted at /pfs, the daemon's storage
+// root at /pach, and the worker binary at /pach-bin/worker.
+func (rt *Runtime) workerCmd(g *rcState, name, ip string, env []string) (*exec.Cmd, error) {
+	if rt.opts.Runtime != "docker" {
+		return exec.Command(rt.opts.WorkerBinary), nil
+	}
+	image := ""
+	for _, c := range g.rc.Spec.Template.Spec.Containers {
+		if c.Name == client.PPSWorkerUserContainerName {
+			image = c.Image
+		}
+	}
+	if image == "" {
+		return nil, errors.Errorf("localclient: no image found for worker %q", name)
+	}
+	scratch := filepath.Join(rt.opts.LocalDir, "workers", name)
+	// The cache mount must NOT be nested inside the /pfs mount: the worker
+	// unlinks every entry of the input dir between datums (except .scratch),
+	// which would empty a nested cache. It lives alongside workers/ instead.
+	cacheDir := filepath.Join(rt.opts.LocalDir, "cache", name)
+	args := []string{
+		"run", "--rm",
+		"--name", name,
+		"--network", "host",
+		"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
+		"--label", "pach-local=worker",
+		"-v", scratch + ":/pfs",
+		"-v", cacheDir + ":/pach-cache",
+		// Bind the daemon's storage root at its real path so that absolute
+		// block paths (PACH_ROOT/block/...) resolve identically in the
+		// container and on the daemon host.
+		"-v", rt.opts.StorageRoot + ":" + rt.opts.StorageRoot,
+		"-v", rt.opts.WorkerBinary + ":/pach-bin/worker:ro",
+	}
+	// The worker's TLS stack (e.g. go-git cloning git inputs) needs a
+	// current CA bundle; base images ship stale or no roots.
+	if _, err := os.Stat("/etc/ssl/certs/ca-certificates.crt"); err == nil {
+		args = append(args, "-v", "/etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro")
+	}
+	for _, e := range env {
+		args = append(args, "-e", e)
+	}
+	args = append(args, image, "/pach-bin/worker")
+	return exec.Command(rt.dockerBin, args...), nil
+}
+
+// preflightImage ensures the worker's image is available before spawning:
+// already-pulled images are free (a local inspect), real missing images are
+// pulled, and nonexistent images fail fast so the pod records the failure at
+// spawn time rather than crash-looping through docker run.
+func (rt *Runtime) preflightImage(g *rcState) error {
+	image := ""
+	for _, c := range g.rc.Spec.Template.Spec.Containers {
+		if c.Name == client.PPSWorkerUserContainerName {
+			image = c.Image
+		}
+	}
+	if image == "" {
+		return nil
+	}
+	if err := exec.Command(rt.dockerBin, "image", "inspect", image).Run(); err == nil {
+		return nil // already present
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, rt.dockerBin, "pull", image).CombinedOutput()
+	if err != nil {
+		return errors.Errorf("could not pull image %q: %v: %s", image, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // spawnPodLocked starts one worker process for g. Callers must hold rt.mu.
 func (rt *Runtime) spawnPodLocked(g *rcState) error {
 	idx := rt.nextPod
@@ -422,6 +639,15 @@ func (rt *Runtime) spawnPodLocked(g *rcState) error {
 	if err := os.MkdirAll(filepath.Join(scratch, client.PPSInputPrefix), 0777); err != nil {
 		return errors.Wrapf(err, "could not create worker scratch dir")
 	}
+	if rt.opts.Runtime == "docker" {
+		if err := os.MkdirAll(filepath.Join(rt.opts.LocalDir, "cache", name), 0777); err != nil {
+			return errors.Wrapf(err, "could not create worker cache dir")
+		}
+	} else {
+		if err := os.MkdirAll(filepath.Join(scratch, "cache"), 0777); err != nil {
+			return errors.Wrapf(err, "could not create worker cache dir")
+		}
+	}
 	logPath := filepath.Join(rt.opts.LocalDir, "logs", name+".jsonl")
 	if err := os.MkdirAll(filepath.Dir(logPath), 0777); err != nil {
 		return errors.Wrapf(err, "could not create log dir")
@@ -431,38 +657,33 @@ func (rt *Runtime) spawnPodLocked(g *rcState) error {
 		return errors.Wrapf(err, "could not open log file %q", logPath)
 	}
 
-	template := &g.rc.Spec.Template.Spec
-	var userEnv []v1.EnvVar
-	for _, c := range template.Containers {
-		if c.Name == client.PPSWorkerUserContainerName {
-			userEnv = c.Env
-		}
-	}
-	env, err := rt.resolveEnv(g.ns, name, ip, userEnv)
+	env, err := rt.workerEnv(g, name, ip)
 	if err != nil {
 		logFile.Close()
+		rt.addFailedPodLocked(g, name, ip, logPath, err)
 		return err
 	}
-	// Identity + connectivity overrides (these replace the k8s Downward API
-	// and k8s-injected service env vars).
-	env = setEnv(env, "PPS_WORKER_IP", ip)
-	env = setEnv(env, "PPS_POD_NAME", name)
-	env = setEnv(env, "PPS_WORKER_GRPC_PORT", strconv.Itoa(int(rt.opts.WorkerPort)))
-	env = setEnv(env, "PEER_PORT", strconv.Itoa(int(rt.opts.PachdPort)))
-	env = setEnv(env, "ETCD_SERVICE_HOST", rt.opts.EtcdHost)
-	env = setEnv(env, "ETCD_SERVICE_PORT", rt.opts.EtcdPort)
-	env = setEnv(env, "PACH_WORKER_ROOT", scratch)
-	env = setEnv(env, "PACH_CACHE_ROOT", filepath.Join(scratch, "cache"))
-	env = setEnv(env, "PACH_ROOT", rt.opts.StorageRoot)
-	env = append(env, "PACH_LOCAL_WORKER=1")
 
-	cmd := exec.Command(rt.opts.WorkerBinary)
+	cmd, err := rt.workerCmd(g, name, ip, env)
+	if err != nil {
+		logFile.Close()
+		rt.addFailedPodLocked(g, name, ip, logPath, err)
+		return err
+	}
+	if rt.opts.Runtime == "docker" {
+		if err := rt.preflightImage(g); err != nil {
+			logFile.Close()
+			rt.addFailedPodLocked(g, name, ip, logPath, err)
+			return err
+		}
+	}
 	cmd.Env = append(os.Environ(), env...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
+		rt.addFailedPodLocked(g, name, ip, logPath, err)
 		return errors.Wrapf(err, "could not start worker process for %q", name)
 	}
 
@@ -481,10 +702,59 @@ func (rt *Runtime) spawnPodLocked(g *rcState) error {
 	return nil
 }
 
+// addFailedPodLocked records a worker replica that could not be started, in a
+// failed pod state the pipeline controller can observe (so the pipeline goes
+// CRASHING instead of the master retrying forever with no visible progress),
+// and retries the spawn with backoff until it succeeds or the RC goes away
+// (k8s CrashLoopBackOff semantics). Callers must hold rt.mu.
+func (rt *Runtime) addFailedPodLocked(g *rcState, name, ip, logPath string, spawnErr error) {
+	p := &podState{
+		name:        name,
+		ip:          ip,
+		logPath:     logPath,
+		group:       g,
+		spawnFailed: true,
+		exitErr:     spawnErr,
+	}
+	g.pods = append(g.pods, p)
+	rt.emitLocked(g, watch.Added, p.podObj(g.ns))
+	log.Errorf("localclient: worker %s failed to start: %v; retrying", name, spawnErr)
+	go func() {
+		for {
+			time.Sleep(2 * time.Second)
+			rt.mu.Lock()
+			stillWanted := false
+			for _, q := range g.pods {
+				if q == p {
+					stillWanted = true
+					break
+				}
+			}
+			if !stillWanted {
+				rt.mu.Unlock()
+				return
+			}
+			err := rt.restartPodLocked(g, p)
+			rt.mu.Unlock()
+			if err == nil {
+				return
+			}
+			log.Errorf("localclient: could not start worker %s (retrying): %v", p.name, err)
+		}
+	}()
+}
+
 // killPodLocked terminates one worker process (its whole process group, so
 // user code children die too) and removes it from g. Callers must hold rt.mu.
 func (rt *Runtime) killPodLocked(g *rcState, p *podState) {
 	if p.cmd != nil && p.cmd.Process != nil {
+		if rt.opts.Runtime == "docker" {
+			// Stop the container first; the foreground `docker run` CLI then
+			// exits on its own.
+			if err := exec.Command(rt.dockerBin, "kill", p.name).Run(); err != nil {
+				log.Warnf("localclient: docker kill %s: %v", p.name, err)
+			}
+		}
 		// Kill the process group so user-code children are not orphaned.
 		syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
 		p.cmd.Process.Kill()
@@ -507,6 +777,15 @@ func (rt *Runtime) monitorPod(g *rcState, p *podState) {
 	err := p.cmd.Wait()
 	p.mu.Lock()
 	p.exitErr = err
+	// A docker CLI exit of 125 means the daemon refused to start the
+	// container (most commonly an image that cannot be pulled); mirror
+	// k8s' ImagePullBackOff so the pipeline controller marks the pipeline
+	// CRASHING instead of a worker crash-loop.
+	if rt.opts.Runtime == "docker" {
+		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 125 {
+			p.spawnFailed = true
+		}
+	}
 	p.mu.Unlock()
 
 	rt.mu.Lock()
@@ -553,35 +832,20 @@ func (rt *Runtime) monitorPod(g *rcState, p *podState) {
 // restartPodLocked starts a fresh process for a crashed pod, reusing its name
 // and IP. Callers must hold rt.mu.
 func (rt *Runtime) restartPodLocked(g *rcState, p *podState) error {
-	scratch := filepath.Join(rt.opts.LocalDir, "workers", p.name)
 	logFile, err := os.OpenFile(p.logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
 	}
-	template := &g.rc.Spec.Template.Spec
-	var userEnv []v1.EnvVar
-	for _, c := range template.Containers {
-		if c.Name == client.PPSWorkerUserContainerName {
-			userEnv = c.Env
-		}
-	}
-	env, err := rt.resolveEnv(g.ns, p.name, p.ip, userEnv)
+	env, err := rt.workerEnv(g, p.name, p.ip)
 	if err != nil {
 		logFile.Close()
 		return err
 	}
-	env = setEnv(env, "PPS_WORKER_IP", p.ip)
-	env = setEnv(env, "PPS_POD_NAME", p.name)
-	env = setEnv(env, "PPS_WORKER_GRPC_PORT", strconv.Itoa(int(rt.opts.WorkerPort)))
-	env = setEnv(env, "PEER_PORT", strconv.Itoa(int(rt.opts.PachdPort)))
-	env = setEnv(env, "ETCD_SERVICE_HOST", rt.opts.EtcdHost)
-	env = setEnv(env, "ETCD_SERVICE_PORT", rt.opts.EtcdPort)
-	env = setEnv(env, "PACH_WORKER_ROOT", scratch)
-	env = setEnv(env, "PACH_CACHE_ROOT", filepath.Join(scratch, "cache"))
-	env = setEnv(env, "PACH_ROOT", rt.opts.StorageRoot)
-	env = append(env, "PACH_LOCAL_WORKER=1")
-
-	cmd := exec.Command(rt.opts.WorkerBinary)
+	cmd, err := rt.workerCmd(g, p.name, p.ip, env)
+	if err != nil {
+		logFile.Close()
+		return err
+	}
 	cmd.Env = append(os.Environ(), env...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -591,6 +855,10 @@ func (rt *Runtime) restartPodLocked(g *rcState, p *podState) error {
 		return errors.Wrapf(err, "could not restart worker process for %q", p.name)
 	}
 	p.cmd = cmd
+	p.mu.Lock()
+	p.exitErr = nil
+	p.spawnFailed = false
+	p.mu.Unlock()
 	rt.emitLocked(g, watch.Modified, p.podObj(g.ns)) // Running again
 	log.Infof("localclient: restarted worker %s", p.name)
 	go rt.monitorPod(g, p)
@@ -604,8 +872,15 @@ func (p *podState) podObj(ns string) *v1.Pod {
 	p.mu.Lock()
 	if p.exitErr != nil {
 		phase = v1.PodFailed
+		reason := "CrashLoopBackOff"
+		if p.spawnFailed {
+			reason = "CreateContainerConfigError"
+			if strings.Contains(strings.ToLower(p.exitErr.Error()), "image") {
+				reason = "ErrImagePull"
+			}
+		}
 		waiting = &v1.ContainerStateWaiting{
-			Reason:  "CrashLoopBackOff",
+			Reason:  reason,
 			Message: p.exitErr.Error(),
 		}
 	}
@@ -698,13 +973,23 @@ func (p *pods) Watch(opts metav1.ListOptions) (watch.Interface, error) {
 }
 
 func (p *pods) GetLogs(name string, opts *v1.PodLogOptions) *rest.Request {
+	// The request needs working serializers: on a non-2xx response (e.g. a
+	// missing pod) rest.Request decodes the error body, and a nil
+	// RenegotiatedDecoder panics the daemon.
+	ser := rest.Serializers{
+		Encoder: scheme.Codecs.LegacyCodec(schema.GroupVersion{Version: "v1"}),
+		Decoder: scheme.Codecs.UniversalDeserializer(),
+		RenegotiatedDecoder: func(contentType string, params map[string]string) (runtime.Decoder, error) {
+			return scheme.Codecs.UniversalDeserializer(), nil
+		},
+	}
 	req := rest.NewRequest(
 		p.runtime.logClient(),
 		"GET",
 		p.runtime.serverURL(),
 		"",
 		rest.ContentConfig{GroupVersion: &schema.GroupVersion{Version: "v1"}},
-		rest.Serializers{},
+		ser,
 		nil, nil, 0,
 	)
 	return req.AbsPath("api", "v1", "namespaces", p.ns, "pods", name, "log").
@@ -840,7 +1125,11 @@ func (rt *Runtime) serveLogs(w http.ResponseWriter, r *http.Request, podName str
 	path := filepath.Join(rt.opts.LocalDir, "logs", podName+".jsonl")
 	f, err := os.Open(path)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("logs for %q not found", podName), http.StatusNotFound)
+		// A JSON body keeps rest.Request's error decoding (which the
+		// debug server exercises) from choking on sniffed text.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprintf(w, `{"message":"logs for %q not found"}`, podName)
 		return
 	}
 	defer f.Close()
