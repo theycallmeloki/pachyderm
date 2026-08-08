@@ -61,6 +61,19 @@ func GetKubeClient(t testing.TB) kube.Interface {
 	return k
 }
 
+// LocalMode reports whether the suite is pointed at a local-mode pachd
+// (PACHD_ADDRESS on loopback), where k8s-only features (pipeline services,
+// auth) are not available and their tests must be skipped.
+func LocalMode() bool {
+	if addr := os.Getenv("PACHD_ADDRESS"); addr != "" {
+		host, _, err := net.SplitHostPort(addr)
+		if err == nil && (host == "localhost" || (net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback())) {
+			return true
+		}
+	}
+	return false
+}
+
 // localKubeClient is the local-mode shim: an empty fake clientset whose
 // Secrets are proxied to the pachd at PACHD_ADDRESS via the pps Secret API.
 type localKubeClient struct {

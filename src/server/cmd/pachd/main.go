@@ -418,15 +418,24 @@ func doLocalMode(config interface{}) (retErr error) {
 	if workerBinary == "" {
 		workerBinary = filepath.Join(filepath.Dir(os.Args[0]), "worker")
 	}
+	pachctlBinary := os.Getenv("PACH_PACHCTL_BINARY")
+	if pachctlBinary == "" {
+		// default to a pachctl next to the daemon binary, if present
+		candidate := filepath.Join(filepath.Dir(os.Args[0]), "pachctl")
+		if _, err := os.Stat(candidate); err == nil {
+			pachctlBinary = candidate
+		}
+	}
 	rt, err := localclient.NewRuntime(localclient.Options{
-		WorkerBinary: workerBinary,
-		EtcdHost:     env.EtcdHost,
-		EtcdPort:     env.EtcdPort,
-		PachdPort:    env.Port,
-		WorkerPort:   env.PPSWorkerPort,
-		LocalDir:     os.Getenv("PACH_LOCAL_DIR"),
-		StorageRoot:  env.StorageRoot,
-		Runtime:      os.Getenv("PACH_WORKER_RUNTIME"),
+		WorkerBinary:  workerBinary,
+		PachctlBinary: pachctlBinary,
+		EtcdHost:      env.EtcdHost,
+		EtcdPort:      env.EtcdPort,
+		PachdPort:     env.Port,
+		WorkerPort:    env.PPSWorkerPort,
+		LocalDir:      os.Getenv("PACH_LOCAL_DIR"),
+		StorageRoot:   env.StorageRoot,
+		Runtime:       os.Getenv("PACH_WORKER_RUNTIME"),
 		DaemonPodName: env.PachdPodName,
 	})
 	if err != nil {

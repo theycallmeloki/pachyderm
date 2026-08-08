@@ -250,9 +250,20 @@ func copyTar(tw *tar.Writer, tr *tar.Reader) error {
 func withSpoutCommit(ctx context.Context, pachClient *client.APIClient, pipelineInfo *pps.PipelineInfo, logger logs.TaggedLogger, f *os.File, cb func(*pfs.Commit, *tar.Reader) error) error {
 	repo := pipelineInfo.Pipeline.Name
 	return backoff.RetryUntilCancel(ctx, func() (retErr error) {
+		// On k8s the sidecar's PFS server appends the spout provenance from
+		// its own SPOUT_PIPELINE_NAME/PPS_SPEC_COMMIT env. Local mode has a
+		// single daemon serving many pipelines, so the worker sets the
+		// provenance explicitly instead.
+		var provenance []*pfs.CommitProvenance
+		if os.Getenv("PACH_LOCAL_WORKER") == "1" {
+			provenance = []*pfs.CommitProvenance{
+				client.NewCommitProvenance(ppsconsts.SpecRepo, pipelineInfo.Pipeline.Name, pipelineInfo.SpecCommit.ID),
+			}
+		}
 		commit, err := pachClient.PfsAPIClient.StartCommit(ctx, &pfs.StartCommitRequest{
-			Parent: client.NewCommit(repo, ""),
-			Branch: pipelineInfo.OutputBranch,
+			Parent:     client.NewCommit(repo, ""),
+			Branch:     pipelineInfo.OutputBranch,
+			Provenance: provenance,
 		})
 		if err != nil {
 			return err

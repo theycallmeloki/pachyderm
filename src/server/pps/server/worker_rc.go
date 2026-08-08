@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"net"
 	"os"
 	"strconv"
 
@@ -667,7 +668,9 @@ func (a *apiServer) createWorkerPachctlSecret(ctx context.Context, ptr *pps.Etcd
 		return errors.Wrapf(err, "error getting the active context")
 	}
 	context.SessionToken = ptr.AuthToken
-	context.PachdAddress = "localhost:653"
+	// The peer port is 653 in k8s (the sidecar) and the remapped
+	// PPS_WORKER_GRPC_PORT in local mode; the daemon serves it in both.
+	context.PachdAddress = net.JoinHostPort("localhost", strconv.Itoa(int(a.env.PeerPort)))
 
 	rawConfig, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {

@@ -890,6 +890,16 @@ func (d *driver) makeCommit(
 	if ok1 && ok2 {
 		log.Infof("Appending provenance for spout: %v %v", spoutName, spoutCommit)
 		provenance = append(provenance, client.NewCommitProvenance(ppsconsts.SpecRepo, spoutName, spoutCommit))
+	} else if os.Getenv("PACH_LOCAL_MODE") == "1" && len(provenance) == 0 {
+		// The k8s sidecar appends the provenance above from its own env; in
+		// local mode a single daemon serves every pipeline, so derive it
+		// from the spec repo instead: a repo with a spec branch is a
+		// pipeline's output repo, and a provenance-less commit on it must be
+		// a spout commit (pachctl-created or worker-created).
+		bi := &pfs.BranchInfo{}
+		if err := d.branches(ppsconsts.SpecRepo).ReadWrite(txnCtx.Stm).Get(newCommit.Repo.Name, bi); err == nil && bi.Head != nil {
+			provenance = append(provenance, client.NewCommitProvenance(ppsconsts.SpecRepo, newCommit.Repo.Name, bi.Head.ID))
+		}
 	}
 
 	// Set newCommitInfo.Started and possibly newCommitInfo.Finished. Enforce:

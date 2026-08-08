@@ -84,6 +84,10 @@ type Options struct {
 	// WorkerBinary is the path to the pachyderm worker binary that will be
 	// spawned for each worker replica.
 	WorkerBinary string
+	// PachctlBinary is an optional pachctl binary mounted into spout worker
+	// containers at /pach-bin/pachctl (the k8s init container provides it
+	// there); spout user code calls `pachctl` to write output.
+	PachctlBinary string
 	// EtcdHost/EtcdPort are where pachd's etcd can be reached; they are
 	// injected into worker processes as ETCD_SERVICE_HOST/PORT.
 	EtcdHost string
@@ -573,7 +577,24 @@ func (rt *Runtime) workerEnv(g *rcState, name, ip string) ([]string, error) {
 		env = setEnv(env, "PACH_ROOT", rt.opts.StorageRoot)
 	}
 	env = append(env, "PACH_LOCAL_WORKER=1")
+	// Spout pipelines run `pachctl` in the user container; point pachctl at
+	// the config secret mounted at /pachctl (the driver appends /pach-bin to
+	// the user code's PATH so the binary is findable).
+	if spoutPod(g) {
+		env = setEnv(env, "PACH_CONFIG", "/pachctl/config.json")
+	}
 	return env, nil
+}
+
+// spoutPod reports whether the pod template belongs to a spout pipeline,
+// detected by the pachctl config secret the pps master adds to spout RCs.
+func spoutPod(g *rcState) bool {
+	for _, vol := range g.rc.Spec.Template.Spec.Volumes {
+		if vol.Secret != nil && strings.HasPrefix(vol.Secret.SecretName, "spout-pachctl-secret-") {
+			return true
+		}
+	}
+	return false
 }
 
 // workerCmd builds the command that runs one worker replica. In process mode
@@ -623,10 +644,13 @@ func (rt *Runtime) workerCmd(g *rcState, name, ip string, env []string) (*exec.C
 	}
 	// Secret volume mounts (transform.Secrets with a MountPath): materialize
 	// each secret's data as files and bind them read-only into the container.
-	// The storage-backend secret and spout pachctl secret are deployment
-	// plumbing, not pipeline secrets - skip them (they are never created in
-	// local mode).
+	// The storage-backend secret is deployment plumbing, not a pipeline
+	// secret - skip it (it is never created in local mode). Spout pipelines
+	// additionally get the pachctl config secret (created by the pps master)
+	// mounted at /pachctl, and the pachctl binary at /pach-bin/pachctl so the
+	// user code can run `pachctl` (the k8s init container does the same).
 	podSpec := g.rc.Spec.Template.Spec
+	isSpout := false
 	var userMounts []v1.VolumeMount
 	for _, c := range podSpec.Containers {
 		if c.Name == client.PPSWorkerUserContainerName {
@@ -638,16 +662,19 @@ func (rt *Runtime) workerCmd(g *rcState, name, ip string, env []string) (*exec.C
 			if vol.Name != vm.Name || vol.Secret == nil {
 				continue
 			}
-			if vol.Secret.SecretName == client.StorageSecretName ||
-				strings.HasPrefix(vol.Secret.SecretName, "spout-pachctl-secret-") {
+			if vol.Secret.SecretName == client.StorageSecretName {
 				continue
 			}
+			isSpout = isSpout || strings.HasPrefix(vol.Secret.SecretName, "spout-pachctl-secret-")
 			hostDir := filepath.Join(rt.opts.LocalDir, "secrets", vol.Secret.SecretName)
 			if err := rt.materializeSecret(g.ns, vol.Secret.SecretName, hostDir); err != nil {
 				return nil, err
 			}
 			args = append(args, "-v", hostDir+":"+vm.MountPath+":ro")
 		}
+	}
+	if isSpout && rt.opts.PachctlBinary != "" {
+		args = append(args, "-v", rt.opts.PachctlBinary+":/pach-bin/pachctl:ro")
 	}
 	for _, e := range env {
 		args = append(args, "-e", e)

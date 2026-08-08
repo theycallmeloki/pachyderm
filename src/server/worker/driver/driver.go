@@ -740,7 +740,16 @@ func (d *driver) RunUserCode(
 	if d.uid != nil && d.gid != nil {
 		cmd.SysProcAttr = makeCmdCredentials(*d.uid, *d.gid)
 	}
-	cmd.Dir = filepath.Join(d.rootDir, d.pipelineInfo.Transform.WorkingDir)
+	// k8s workers default WorkingDir to the image's WORKDIR via docker
+	// inspection; local docker workers can't inspect (no socket), but the
+	// worker process's own cwd IS the image WORKDIR, so inherit it there.
+	workingDir := d.pipelineInfo.Transform.WorkingDir
+	if workingDir == "" && d.rootDir == "/" {
+		if wd, err := os.Getwd(); err == nil {
+			workingDir = wd
+		}
+	}
+	cmd.Dir = filepath.Join(d.rootDir, workingDir)
 	err := cmd.Start()
 	if err != nil {
 		return errors.EnsureStack(err)
@@ -1278,6 +1287,14 @@ func (d *driver) UserCodeEnv(
 
 	if outputCommit != nil {
 		result = append(result, fmt.Sprintf("%s=%s", client.OutputCommitIDEnv, outputCommit.ID))
+	}
+
+	// Spout (and service+spout) user code shells out to `pachctl`, which
+	// lives in the shared /pach-bin volume; make it findable without
+	// clobbering the image's own PATH (e.g. /usr/local/go/bin on the
+	// spout-test image).
+	if d.pipelineInfo.Spout != nil {
+		result = append(result, "PATH="+os.Getenv("PATH")+":/pach-bin")
 	}
 
 	return result
