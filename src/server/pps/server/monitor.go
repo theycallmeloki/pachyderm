@@ -27,6 +27,7 @@ import (
 	"github.com/robfig/cron"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/pachyderm/pachyderm/src/client"
 	"github.com/pachyderm/pachyderm/src/client/pfs"
