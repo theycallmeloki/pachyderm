@@ -18,7 +18,7 @@ import (
 func Cmds() []*cobra.Command {
 	var commands []*cobra.Command
 
-	var noObjects, noEnterprise, noAuth bool
+	var noObjects, noAuth bool
 	var url string
 	extract := &cobra.Command{
 		Short: "Extract Pachyderm state to stdout or an object store bucket.",
@@ -37,7 +37,7 @@ $ {{alias}} -u s3://bucket/backup`,
 
 			defer c.Close()
 			if url != "" {
-				return c.ExtractURL(url, !noEnterprise, !noAuth)
+				return c.ExtractURL(url, false, !noAuth)
 			}
 			w := snappy.NewBufferedWriter(os.Stdout)
 			defer func() {
@@ -45,11 +45,10 @@ $ {{alias}} -u s3://bucket/backup`,
 					retErr = err
 				}
 			}()
-			return c.ExtractWriter(!noObjects, !noEnterprise, !noAuth, w)
+			return c.ExtractWriter(!noObjects, false, !noAuth, w)
 		}),
 	}
 	extract.Flags().BoolVar(&noObjects, "no-objects", false, "don't extract from object storage, only extract data from etcd")
-	extract.Flags().BoolVar(&noEnterprise, "no-enterprise", false, "don't extract the enterprise license information")
 	extract.Flags().BoolVar(&noAuth, "no-auth", false, "don't extract the authentication information")
 	extract.Flags().StringVarP(&url, "url", "u", "", "An object storage url (i.e. s3://...) to extract to.")
 	commands = append(commands, cmdutil.CreateAlias(extract, "extract"))

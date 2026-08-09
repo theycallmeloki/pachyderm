@@ -72,14 +72,12 @@ go clean -testcache
 case "${BUCKET}" in
  MISC)
     make lint
-    make enterprise-code-checkin-test
     make test-cmds
     make test-libs
     make test-proto-static
     make test-transaction
     make test-deploy-manifests
     make test-s3gateway-unit
-    make test-enterprise
     make test-worker
     if [[ "${TRAVIS_SECURE_ENV_VARS:-""}" == "true" ]]; then
         # these tests require secure env vars to run, which aren't available

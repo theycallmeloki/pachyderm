@@ -206,7 +206,7 @@ func testExtractRestore(t *testing.T, testObjects, testAuth bool) {
 	require.NoError(t, c.DeleteAll())
 
 	// If we're testing auth, get an authenticated client.
-	// This has the side-effect of enabling enterprise and auth
+	// This has the side-effect of enabling auth
 	if testAuth {
 		c = tu.GetAuthenticatedPachClient(t, tu.AdminUser)
 

@@ -43,7 +43,6 @@ src - source code
 │   ├── auth - auth-related functionality
 │   ├── debug - debug-related functionality
 │   ├── deploy - deployment-related functionality
-│   ├── enterprise - enterprise-related functionality
 │   ├── health - health check-related functionality
 │   ├── limit - limit-related functionality
 │   ├── pfs - PFS-related functionality
@@ -80,9 +79,6 @@ src - source code
 │   │   ├── cmds - debug CLI
 │   │   └── server - debug server
 │   ├── deploy - storage secret deployment server
-│   ├── enterprise - enterprise functionality
-│   │   ├── cmds - enterprise CLI
-│   │   └── server - enterprise server
 │   ├── health - health check server
 │   ├── http - PFS-over-HTTP server, used by the dash to serve PFS content
 │   ├── pfs - PFS functionality

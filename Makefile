@@ -242,17 +242,7 @@ proto: docker-build-proto
 	./etc/proto/build.sh
 
 # Run all the tests. Note! This is no longer the test entrypoint for travis
-test: clean-launch-dev launch-dev lint enterprise-code-checkin-test docker-build test-pfs-server test-cmds test-libs test-vault test-auth test-enterprise test-worker test-admin test-pps
-
-enterprise-code-checkin-test:
-	@which ag || { printf "'ag' not found. Run:\n  sudo apt-get install -y silversearcher-ag\n  brew install the_silver_searcher\nto install it\n\n"; exit 1; }
-	# Check if our test activation code is anywhere in the repo
-	@echo "Files containing test Pachyderm Enterprise activation token:"; \
-	if ag --ignore=Makefile -p .gitignore 'RM2o1Qit6YlZhS1RGdXVac'; \
-	then \
-	  $$( which echo ) -e "\n*** It looks like Pachyderm Engineering's test activation code may be in this repo. Please remove it before committing! ***\n"; \
-	  false; \
-	fi
+test: clean-launch-dev launch-dev lint docker-build test-pfs-server test-cmds test-libs test-vault test-auth test-worker test-admin test-pps
 
 test-pfs-server:
 	./etc/testing/start_postgres.sh
@@ -333,9 +323,6 @@ test-auth:
 
 test-admin:
 	go test -v -count=1 ./src/server/admin/server -timeout $(TIMEOUT) $(RUN)
-
-test-enterprise:
-	go test -v -count=1 ./src/server/enterprise/server -timeout $(TIMEOUT)
 
 test-tls:
 	./etc/testing/test_tls.sh
@@ -513,7 +500,6 @@ spellcheck:
 	regenerate-test-deploy-manifests \
 	proto \
 	test \
-	enterprise-code-checkin-test \
 	test-pfs-server \
 	test-pfs-storage \
 	test-pps \
@@ -529,7 +515,6 @@ spellcheck:
 	test-local \
 	test-auth \
 	test-admin \
-	test-enterprise \
 	test-tls \
 	test-worker \
 	test-worker-helper \

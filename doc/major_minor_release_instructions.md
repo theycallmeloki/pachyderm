@@ -57,8 +57,6 @@ mkdir -p src/client/admin/v1_12/pps
 cp src/client/pps/pps.proto src/client/admin/v1_12/pps/pps.proto
 mkdir -p src/client/admin/v1_12/auth
 cp src/client/auth/auth.proto src/client/admin/v1_12/auth/auth.proto
-mkdir -p src/client/admin/v1_12/enterprise
-cp src/client/enterprise/enterprise.proto src/client/admin/v1_12/enterprise/enterprise.proto
 ```
 
 Then, in the copied over protos:

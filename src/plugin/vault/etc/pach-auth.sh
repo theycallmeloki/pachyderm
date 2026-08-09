@@ -2,19 +2,11 @@
 
 set -euxo pipefail
 
-# Make sure Pachyderm enterprise and auth are enabled
+# Make sure Pachyderm auth is enabled
 command -v aws || pip install awscli --upgrade --user
 
 function activate {
     pachctl config update context "$(pachctl config get active-context)" --pachd-address="$(minikube ip):30650"
-
-    if [[ "$(pachctl enterprise get-state)" = "No Pachyderm Enterprise token was found" ]]; then
-        # Don't print token to stdout
-        # This is very important, or we'd leak it in our CI logs
-        set +x
-        echo "$ENT_ACT_CODE" | pachctl enterprise activate
-        set -x
-    fi
 
     # Activate Pachyderm auth, if needed, and log in
     if ! pachctl auth list-admins; then

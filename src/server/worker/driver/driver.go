@@ -168,7 +168,7 @@ type driver struct {
 	uid *uint32
 	gid *uint32
 
-	// Application statistics are always exported (no enterprise license required)
+	// Application statistics are always exported
 	exportStats bool
 
 	// The root directory to use when setting the user code path. This is normally

@@ -15,7 +15,6 @@ HERE="$(dirname "${0}")"
 
 set -x
 
-pachctl_1_11 enterprise activate "$ENT_ACT_CODE"
 pachctl_1_11 auth activate --initial-admin=robot:test
 
 pachctl_1_11 create repo left

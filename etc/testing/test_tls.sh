@@ -22,9 +22,6 @@ etc/deploy/gen_pachd_tls.sh "$hostport" ""
 # Restart pachyderm with the given certs
 etc/deploy/restart_with_tls.sh "$hostport" "${PWD}/pachd.pem" "${PWD}/pachd.key"
 
-set +x # Do not log our activation code when running this script in Travis
-echo "$ENT_ACT_CODE" | pachctl enterprise activate && echo
-set -x
 
 # Make sure the pachyderm client can connect, write data, and create pipelines
 go test -v -count=1 ./src/server -run TestSimplePipeline

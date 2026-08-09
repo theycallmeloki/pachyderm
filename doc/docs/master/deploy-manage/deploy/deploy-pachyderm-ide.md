@@ -43,9 +43,9 @@ on a supported Kubernetes platforms:
     see [Zero to JupyterHub with Kubernetes](https://zero-to-jupyterhub.readthedocs.io/en/latest/).
 
 * Register your Enterprise token as described in
-[Activate Pachyderm Enterprise Edition](../../../enterprise/deployment/#activate-pachyderm-enterprise-edition).
+Activate Pachyderm as described in the deployment documentation.
 
-* Enable [Pachyderm Access Controls](../../../enterprise/auth/auth/).
+* Enable Pachyderm access controls.
 
 ## Deploy Pachyderm IDE
 
