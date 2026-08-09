@@ -9,6 +9,23 @@
 [![Slack Status](https://badge.slack.pachyderm.io/badge.svg)](https://slack.pachyderm.io)
 [![CLA assistant](https://cla-assistant.io/readme/badge/pachyderm/pachyderm)](https://cla-assistant.io/pachyderm/pachyderm)
 
+# Pachyderm 1.x Maintenance Fork
+
+This repository is an independent maintenance fork based on Pachyderm v1.12.5.
+
+The project exists to maintain a usable Pachyderm 1.x codebase and selectively
+backport fixes from the 1.13.x series. Pachyderm 2.x is intentionally outside
+the scope of this project.
+
+This is not an official Pachyderm project and is not affiliated with Pachyderm Inc.
+
+Modifications made in this repository are identified as required by the
+Pachyderm Community License. Original copyright and proprietary notices are
+retained.
+
+This project is maintained for the author's own infrastructure and development
+needs. It is not intended to provide a competing Pachyderm product or service.
+
 # Pachyderm: Data Versioning, Data Pipelines, and Data Lineage
 
 Pachyderm is a tool for production data pipelines. If you need to chain
