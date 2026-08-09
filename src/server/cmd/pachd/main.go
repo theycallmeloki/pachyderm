@@ -39,7 +39,7 @@ import (
 	cache_server "github.com/pachyderm/pachyderm/src/server/pkg/cache/server"
 	"github.com/pachyderm/pachyderm/src/server/pkg/cmdutil"
 	col "github.com/pachyderm/pachyderm/src/server/pkg/collection"
-	"github.com/pachyderm/pachyderm/src/server/pkg/deploy/assets"
+	"github.com/pachyderm/pachyderm/src/server/pkg/workerconfig"
 	"github.com/pachyderm/pachyderm/src/server/pkg/hashtree"
 	"github.com/pachyderm/pachyderm/src/server/pkg/localclient"
 	"github.com/pachyderm/pachyderm/src/server/pkg/localetcd"
@@ -195,11 +195,11 @@ func runLocal() {
 	}
 	// These are normally injected by the k8s deployment; they are required by
 	// the worker pod spec construction.
-	if os.Getenv(assets.UploadConcurrencyLimitEnvVar) == "" {
-		os.Setenv(assets.UploadConcurrencyLimitEnvVar, strconv.Itoa(assets.DefaultUploadConcurrencyLimit))
+	if os.Getenv(workerconfig.UploadConcurrencyLimitEnvVar) == "" {
+		os.Setenv(workerconfig.UploadConcurrencyLimitEnvVar, strconv.Itoa(workerconfig.DefaultUploadConcurrencyLimit))
 	}
-	if os.Getenv(assets.PutFileConcurrencyLimitEnvVar) == "" {
-		os.Setenv(assets.PutFileConcurrencyLimitEnvVar, strconv.Itoa(assets.DefaultPutFileConcurrencyLimit))
+	if os.Getenv(workerconfig.PutFileConcurrencyLimitEnvVar) == "" {
+		os.Setenv(workerconfig.PutFileConcurrencyLimitEnvVar, strconv.Itoa(workerconfig.DefaultPutFileConcurrencyLimit))
 	}
 	cmdutil.Main(doLocalMode, &serviceenv.PachdFullConfiguration{})
 }
@@ -901,7 +901,7 @@ func runFullMode(env *serviceenv.ServiceEnv, rt *localclient.Runtime) (retErr er
 		return server.ListenAndServeTLS(certPath, keyPath)
 	})
 	go waitForError("Prometheus Server", errChan, requireNoncriticalServers, func() error {
-		promPort := assets.PrometheusPort
+		promPort := workerconfig.PrometheusPort
 		if envPort := os.Getenv("PROMETHEUS_PORT"); envPort != "" {
 			p, err := strconv.Atoi(envPort)
 			if err != nil {

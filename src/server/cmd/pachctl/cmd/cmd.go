@@ -6,7 +6,6 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
-	"os/signal"
 	"sort"
 	"strings"
 	"text/template"
@@ -26,7 +25,6 @@ import (
 	debugcmds "github.com/pachyderm/pachyderm/src/server/debug/cmds"
 	pfscmds "github.com/pachyderm/pachyderm/src/server/pfs/cmds"
 	"github.com/pachyderm/pachyderm/src/server/pkg/cmdutil"
-	deploycmds "github.com/pachyderm/pachyderm/src/server/pkg/deploy/cmds"
 	logutil "github.com/pachyderm/pachyderm/src/server/pkg/log"
 	"github.com/pachyderm/pachyderm/src/server/pkg/metrics"
 	ppscmds "github.com/pachyderm/pachyderm/src/server/pps/cmds"
@@ -420,7 +418,7 @@ Environment variables:
 			if err != nil {
 				buf := bytes.NewBufferString("")
 				errWriter := ansiterm.NewTabWriter(buf, 20, 1, 3, ' ', 0)
-				fmt.Fprintf(errWriter, "pachd\t(version unknown) : error connecting to pachd server at address (%v): %v\n\nplease make sure pachd is up (`kubectl get all`) and portforwarding is enabled\n", pachClient.GetAddress(), status.Convert(err).Message())
+				fmt.Fprintf(errWriter, "pachd\t(version unknown) : error connecting to pachd server at address (%v): %v\n\nplease make sure pachd is up and running\n", pachClient.GetAddress(), status.Convert(err).Message())
 				errWriter.Flush()
 				return errors.New(buf.String())
 			}
@@ -522,162 +520,6 @@ This resets the cluster to its initial state.`,
 	}
 	subcommands = append(subcommands, cmdutil.CreateAlias(deleteAll, "delete all"))
 
-	var port uint16
-	var remotePort uint16
-	var samlPort uint16
-	var remoteSamlPort uint16
-	var oidcPort uint16
-	var remoteOidcPort uint16
-	var uiPort uint16
-	var uiWebsocketPort uint16
-	var pfsPort uint16
-	var s3gatewayPort uint16
-	var namespace string
-	portForward := &cobra.Command{
-		Short: "Forward a port on the local machine to pachd. This command blocks.",
-		Long:  "Forward a port on the local machine to pachd. This command blocks.",
-		Run: cmdutil.RunFixedArgs(0, func(args []string) error {
-			// TODO(ys): remove the `--namespace` flag here eventually
-			if namespace != "" {
-				fmt.Printf("WARNING: The `--namespace` flag is deprecated and will be removed in a future version. Please set the namespace in the pachyderm context instead: pachctl config update context `pachctl config get active-context` --namespace '%s'\n", namespace)
-			}
-
-			cfg, err := config.Read(false, false)
-			if err != nil {
-				return err
-			}
-			contextName, context, err := cfg.ActiveContext(true)
-			if err != nil {
-				return err
-			}
-			if context.PortForwarders != nil && len(context.PortForwarders) > 0 {
-				return errors.New("port forwarding appears to already be running for this context")
-			}
-
-			fw, err := client.NewPortForwarder(context, namespace)
-			if err != nil {
-				return err
-			}
-			defer fw.Close()
-
-			context.PortForwarders = map[string]uint32{}
-			successCount := 0
-
-			fmt.Println("Forwarding the pachd (Pachyderm daemon) port...")
-			port, err := fw.RunForDaemon(port, remotePort)
-			if err != nil {
-				fmt.Printf("port forwarding failed: %v\n", err)
-			} else {
-				fmt.Printf("listening on port %d\n", port)
-				context.PortForwarders["pachd"] = uint32(port)
-				successCount++
-			}
-
-			fmt.Println("Forwarding the SAML ACS port...")
-			port, err = fw.RunForSAMLACS(samlPort, remoteSamlPort)
-			if err != nil {
-				fmt.Printf("port forwarding failed: %v\n", err)
-			} else {
-				fmt.Printf("listening on port %d\n", port)
-				context.PortForwarders["saml-acs"] = uint32(port)
-				successCount++
-			}
-
-			fmt.Println("Forwarding the OIDC ACS port...")
-			port, err = fw.RunForOIDCACS(oidcPort, remoteOidcPort)
-			if err != nil {
-				fmt.Printf("port forwarding failed: %v\n", err)
-			} else {
-				fmt.Printf("listening on port %d\n", port)
-				context.PortForwarders["oidc-acs"] = uint32(port)
-				successCount++
-			}
-
-			fmt.Printf("Forwarding the dash (Pachyderm dashboard) UI port to http://localhost:%v...\n", uiPort)
-			port, err = fw.RunForDashUI(uiPort)
-			if err != nil {
-				fmt.Printf("port forwarding failed: %v\n", err)
-			} else {
-				fmt.Printf("listening on port %d\n", port)
-				context.PortForwarders["dash-ui"] = uint32(port)
-				successCount++
-			}
-
-			fmt.Println("Forwarding the dash (Pachyderm dashboard) websocket port...")
-			port, err = fw.RunForDashWebSocket(uiWebsocketPort)
-			if err != nil {
-				fmt.Printf("port forwarding failed: %v\n", err)
-			} else {
-				fmt.Printf("listening on port %d\n", port)
-				context.PortForwarders["dash-ws"] = uint32(port)
-				successCount++
-			}
-
-			fmt.Println("Forwarding the PFS port...")
-			port, err = fw.RunForPFS(pfsPort)
-			if err != nil {
-				fmt.Printf("port forwarding failed: %v\n", err)
-			} else {
-				fmt.Printf("listening on port %d\n", port)
-				context.PortForwarders["pfs-over-http"] = uint32(port)
-				successCount++
-			}
-
-			fmt.Println("Forwarding the s3gateway port...")
-			port, err = fw.RunForS3Gateway(s3gatewayPort)
-			if err != nil {
-				fmt.Printf("port forwarding failed: %v\n", err)
-			} else {
-				fmt.Printf("listening on port %d\n", port)
-				context.PortForwarders["s3g"] = uint32(port)
-				successCount++
-			}
-
-			if successCount == 0 {
-				return errors.New("failed to start port forwarders")
-			}
-
-			if err = cfg.Write(); err != nil {
-				return err
-			}
-
-			defer func() {
-				// reload config in case changes have happened since the
-				// config was last read
-				cfg, err := config.Read(true, false)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "failed to read config file: %v\n", err)
-					return
-				}
-				context, ok := cfg.V2.Contexts[contextName]
-				if ok {
-					context.PortForwarders = nil
-					if err := cfg.Write(); err != nil {
-						fmt.Fprintf(os.Stderr, "failed to write config file: %v\n", err)
-					}
-				}
-			}()
-
-			fmt.Println("CTRL-C to exit")
-			ch := make(chan os.Signal, 1)
-			signal.Notify(ch, os.Interrupt)
-			<-ch
-
-			return nil
-		}),
-	}
-	portForward.Flags().Uint16VarP(&port, "port", "p", 30650, "The local port to bind pachd to.")
-	portForward.Flags().Uint16Var(&remotePort, "remote-port", 650, "The remote port that pachd is bound to in the cluster.")
-	portForward.Flags().Uint16Var(&samlPort, "saml-port", 30654, "The local port to bind pachd's SAML ACS to.")
-	portForward.Flags().Uint16Var(&remoteSamlPort, "remote-saml-port", 654, "The remote port that SAML ACS is bound to in the cluster.")
-	portForward.Flags().Uint16Var(&oidcPort, "oidc-port", 30657, "The local port to bind pachd's OIDC ACS to.")
-	portForward.Flags().Uint16Var(&remoteOidcPort, "remote-oidc-port", 657, "The remote port that OIDC ACS is bound to in the cluster.")
-	portForward.Flags().Uint16VarP(&uiPort, "ui-port", "u", 30080, "The local port to bind Pachyderm's dash service to.")
-	portForward.Flags().Uint16VarP(&uiWebsocketPort, "proxy-port", "x", 30081, "The local port to bind Pachyderm's dash proxy service to.")
-	portForward.Flags().Uint16VarP(&pfsPort, "pfs-port", "f", 30652, "The local port to bind PFS over HTTP to.")
-	portForward.Flags().Uint16VarP(&s3gatewayPort, "s3gateway-port", "s", 30600, "The local port to bind the s3gateway to.")
-	portForward.Flags().StringVar(&namespace, "namespace", "", "Kubernetes namespace Pachyderm is deployed in.")
-	subcommands = append(subcommands, cmdutil.CreateAlias(portForward, "port-forward"))
 
 	var install bool
 	var installPathBash string
@@ -827,7 +669,6 @@ This resets the cluster to its initial state.`,
 
 	subcommands = append(subcommands, pfscmds.Cmds()...)
 	subcommands = append(subcommands, ppscmds.Cmds()...)
-	subcommands = append(subcommands, deploycmds.Cmds()...)
 	subcommands = append(subcommands, authcmds.Cmds()...)
 	subcommands = append(subcommands, admincmds.Cmds()...)
 	subcommands = append(subcommands, debugcmds.Cmds()...)

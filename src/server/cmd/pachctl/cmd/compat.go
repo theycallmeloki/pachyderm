@@ -73,8 +73,6 @@ func applyCommandCompat1_8(rootCmd *cobra.Command) {
 		"debug profile":            "debug-profile",
 		"debug binary":             "debug-binary",
 		"delete all":               "delete-all",
-		"deploy storage amazon":    "deploy storage aws",
-		"deploy storage microsoft": "deploy storage azure",
 	}
 
 	for newName, oldName := range simpleCompat {
@@ -635,11 +633,7 @@ Provenance: {{range .Provenance}} {{.Repo.Name}}/{{.ID}}{{end}}{{end}}
 
 				// Special case for a couple commands that don't match the pattern
 				var newPath string
-				if oldPath == fmt.Sprintf("%s deploy storage aws", os.Args[0]) {
-					newPath = fmt.Sprintf("%s deploy storage amazon", os.Args[0])
-				} else if oldPath == fmt.Sprintf("%s deploy storage azure", os.Args[0]) {
-					newPath = fmt.Sprintf("%s deploy storage microsoft", os.Args[0])
-				} else if oldPath == fmt.Sprintf("%s get-logs", os.Args[0]) {
+				if oldPath == fmt.Sprintf("%s get-logs", os.Args[0]) {
 					newPath = fmt.Sprintf("%s logs", os.Args[0])
 				} else {
 					newPath = strings.Replace(oldPath, "-", " ", -1)

@@ -18,7 +18,7 @@ import (
 	"github.com/pachyderm/pachyderm/src/client/pkg/tracing"
 	"github.com/pachyderm/pachyderm/src/client/pps"
 	"github.com/pachyderm/pachyderm/src/client/version"
-	"github.com/pachyderm/pachyderm/src/server/pkg/deploy/assets"
+	"github.com/pachyderm/pachyderm/src/server/pkg/workerconfig"
 	"github.com/pachyderm/pachyderm/src/server/pkg/ppsutil"
 	workerstats "github.com/pachyderm/pachyderm/src/server/worker/stats"
 
@@ -133,7 +133,7 @@ func (a *apiServer) workerPodSpec(options *workerOptions, pipelineInfo *pps.Pipe
 		Name:  "METRICS",
 		Value: strconv.FormatBool(a.env.Metrics),
 	}}
-	sidecarEnv = append(sidecarEnv, assets.GetSecretEnvVars(a.storageBackend)...)
+	sidecarEnv = append(sidecarEnv, workerconfig.GetSecretEnvVars(a.storageBackend)...)
 	storageEnvVars, err := getStorageEnvVars(pipelineInfo)
 	if err != nil {
 		return v1.PodSpec{}, err
@@ -202,7 +202,7 @@ func (a *apiServer) workerPodSpec(options *workerOptions, pipelineInfo *pps.Pipe
 			Value: strconv.FormatBool(a.env.Metrics),
 		},
 	}...)
-	workerEnv = append(workerEnv, assets.GetSecretEnvVars(a.storageBackend)...)
+	workerEnv = append(workerEnv, workerconfig.GetSecretEnvVars(a.storageBackend)...)
 
 	// Set S3GatewayPort in the worker (for user code) and sidecar (for serving)
 	if options.s3GatewayPort != 0 {
@@ -266,11 +266,6 @@ func (a *apiServer) workerPodSpec(options *workerOptions, pipelineInfo *pps.Pipe
 		sidecarVolumeMounts = append(sidecarVolumeMounts, emptyDirVolumeMount)
 		userVolumeMounts = append(userVolumeMounts, emptyDirVolumeMount)
 	}
-	secretVolume, secretMount := assets.GetBackendSecretVolumeAndMount(a.storageBackend)
-	options.volumes = append(options.volumes, secretVolume)
-	sidecarVolumeMounts = append(sidecarVolumeMounts, secretMount)
-	userVolumeMounts = append(userVolumeMounts, secretMount)
-
 	// mount secret for spouts using pachctl
 	if pipelineInfo.Spout != nil {
 		pachctlSecretVolume, pachctlSecretMount := getPachctlSecretVolumeAndMount("spout-pachctl-secret-" + pipelineInfo.Pipeline.Name)
@@ -285,12 +280,6 @@ func (a *apiServer) workerPodSpec(options *workerOptions, pipelineInfo *pps.Pipe
 	cpuZeroQuantity := resource.MustParse("0")
 	memDefaultQuantity := resource.MustParse("64M")
 	memSidecarQuantity := resource.MustParse(options.cacheSize)
-
-	// Get service account name for worker from env or use default
-	workerServiceAccountName, ok := os.LookupEnv(assets.WorkerServiceAccountEnvVar)
-	if !ok {
-		workerServiceAccountName = assets.DefaultWorkerServiceAccountName
-	}
 
 	// possibly expose s3 gateway port in the sidecar container
 	var sidecarPorts []v1.ContainerPort
@@ -319,7 +308,6 @@ func (a *apiServer) workerPodSpec(options *workerOptions, pipelineInfo *pps.Pipe
 	if a.workerUsesRoot {
 		securityContext = &v1.PodSecurityContext{RunAsUser: &zeroVal}
 	}
-	workerImage = assets.AddRegistry("", workerImage)
 	podSpec := v1.PodSpec{
 		InitContainers: []v1.Container{
 			{
@@ -367,7 +355,6 @@ func (a *apiServer) workerPodSpec(options *workerOptions, pipelineInfo *pps.Pipe
 				Ports: sidecarPorts,
 			},
 		},
-		ServiceAccountName:            workerServiceAccountName,
 		RestartPolicy:                 "Always",
 		Volumes:                       options.volumes,
 		ImagePullSecrets:              options.imagePullSecrets,
@@ -444,18 +431,18 @@ func (a *apiServer) workerPodSpec(options *workerOptions, pipelineInfo *pps.Pipe
 }
 
 func getStorageEnvVars(pipelineInfo *pps.PipelineInfo) ([]v1.EnvVar, error) {
-	uploadConcurrencyLimit, ok := os.LookupEnv(assets.UploadConcurrencyLimitEnvVar)
+	uploadConcurrencyLimit, ok := os.LookupEnv(workerconfig.UploadConcurrencyLimitEnvVar)
 	if !ok {
-		return nil, errors.Errorf("%s not found", assets.UploadConcurrencyLimitEnvVar)
+		return nil, errors.Errorf("%s not found", workerconfig.UploadConcurrencyLimitEnvVar)
 	}
 	if pipelineInfo.Spout != nil {
 		return []v1.EnvVar{
-			{Name: assets.UploadConcurrencyLimitEnvVar, Value: uploadConcurrencyLimit},
+			{Name: workerconfig.UploadConcurrencyLimitEnvVar, Value: uploadConcurrencyLimit},
 			{Name: "SPOUT_PIPELINE_NAME", Value: pipelineInfo.Pipeline.Name},
 		}, nil
 	}
 	return []v1.EnvVar{
-		{Name: assets.UploadConcurrencyLimitEnvVar, Value: uploadConcurrencyLimit},
+		{Name: workerconfig.UploadConcurrencyLimitEnvVar, Value: uploadConcurrencyLimit},
 	}, nil
 }
 
@@ -872,7 +859,7 @@ func (a *apiServer) checkOrDeployGithookService() error {
 	_, err := getGithookService(kubeClient, a.namespace)
 	if err != nil {
 		if errors.As(err, &errGithookServiceNotFound{}) {
-			svc := assets.GithookService(a.namespace)
+			svc := workerconfig.GithookService(a.namespace)
 			_, err = kubeClient.CoreV1().Services(a.namespace).Create(svc)
 			return err
 		}
