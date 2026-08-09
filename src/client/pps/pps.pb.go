@@ -4222,6 +4222,9 @@ type ListDatumRequest struct {
 	Input                *Input   `protobuf:"bytes,4,opt,name=input,proto3" json:"input,omitempty"`
 	PageSize             int64    `protobuf:"varint,2,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
 	Page                 int64    `protobuf:"varint,3,opt,name=page,proto3" json:"page,omitempty"`
+	// Enables retrieving only status information for datums, rather than including the
+	// inputs and time spent, which improves performance.
+	StatusOnly           bool     `protobuf:"varint,5,opt,name=status_only,json=statusOnly,proto3" json:"status_only,omitempty"`
 	XXX_NoUnkeyedLiteral struct{} `json:"-"`
 	XXX_unrecognized     []byte   `json:"-"`
 	XXX_sizecache        int32    `json:"-"`
@@ -4286,6 +4289,13 @@ func (m *ListDatumRequest) GetPage() int64 {
 		return m.Page
 	}
 	return 0
+}
+
+func (m *ListDatumRequest) GetStatusOnly() bool {
+	if m != nil {
+		return m.StatusOnly
+	}
+	return false
 }
 
 type ListDatumResponse struct {
@@ -11183,6 +11193,16 @@ func (m *ListDatumRequest) MarshalToSizedBuffer(dAtA []byte) (int, error) {
 		i -= len(m.XXX_unrecognized)
 		copy(dAtA[i:], m.XXX_unrecognized)
 	}
+	if m.StatusOnly {
+		i--
+		if m.StatusOnly {
+			dAtA[i] = 1
+		} else {
+			dAtA[i] = 0
+		}
+		i--
+		dAtA[i] = 0x28
+	}
 	if m.Input != nil {
 		{
 			size, err := m.Input.MarshalToSizedBuffer(dAtA[:i])
@@ -14150,6 +14170,9 @@ func (m *ListDatumRequest) Size() (n int) {
 	if m.Input != nil {
 		l = m.Input.Size()
 		n += 1 + l + sovPps(uint64(l))
+	}
+	if m.StatusOnly {
+		n += 2
 	}
 	if m.XXX_unrecognized != nil {
 		n += len(m.XXX_unrecognized)
@@ -25612,6 +25635,26 @@ func (m *ListDatumRequest) Unmarshal(dAtA []byte) error {
 				return err
 			}
 			iNdEx = postIndex
+		case 5:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field StatusOnly", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowPps
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.StatusOnly = bool(v != 0)
 		default:
 			iNdEx = preIndex
 			skippy, err := skipPps(dAtA[iNdEx:])

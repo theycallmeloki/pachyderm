@@ -631,6 +631,9 @@ message ListDatumRequest {
   // The datums listed are the ones that would be run if a pipeline was created
   // with input.
   Input input = 4;
+  // Enables retrieving only status information for datums, rather than including the
+  // inputs and time spent, which improves performance.
+  bool status_only = 5;
   int64 page_size = 2;
   int64 page = 3;
 }
