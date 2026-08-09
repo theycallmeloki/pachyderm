@@ -16,7 +16,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
@@ -32,8 +34,11 @@ import (
 	"github.com/pachyderm/pachyderm/src/client/auth"
 	"github.com/pachyderm/pachyderm/src/client/pfs"
 	"github.com/pachyderm/pachyderm/src/client/pkg/errors"
+	"github.com/pachyderm/pachyderm/src/client/pkg/grpcutil"
 	"github.com/pachyderm/pachyderm/src/client/pkg/require"
 	"github.com/pachyderm/pachyderm/src/client/pps"
+	"github.com/pachyderm/pachyderm/src/server/pkg/agent"
+	"github.com/pachyderm/pachyderm/src/server/pkg/netutil"
 	pfspretty "github.com/pachyderm/pachyderm/src/server/pfs/pretty"
 	"github.com/pachyderm/pachyderm/src/server/pkg/ancestry"
 	"github.com/pachyderm/pachyderm/src/server/pkg/backoff"
@@ -13969,4 +13974,260 @@ func getEtcdClient(t testing.TB) *etcd.Client {
 		require.NoError(t, err)
 	})
 	return etcdClient
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// Broker placement (multi-node) regression tests
+//
+// These run the broker agent in-process (src/server/pkg/agent) against the
+// live daemon and assert the observable contracts of remote placement:
+// tagged pipelines complete on an agent-registered node, pipeline services
+// are reachable through the daemon->node->agent relay chain, and a pipeline
+// recovers when its node comes back after a loss. They skip when the
+// environment cannot host an agent (no worker binary) or the daemon has the
+// broker disabled.
+
+// startBrokerTestAgent runs an agent for 'tag' in-process and returns a
+// stop func that shuts it down (killing its workers).
+func startBrokerTestAgent(t *testing.T, tag string) func() {
+	t.Helper()
+	if os.Getenv("PACH_WORKER_BINARY") == "" {
+		t.Skip("PACH_WORKER_BINARY not set; cannot run broker placement test")
+	}
+	brokerAddr := os.Getenv("PACH_BROKER_ADDRESS")
+	if brokerAddr == "off" {
+		t.Skip("daemon broker disabled (PACH_BROKER_ADDRESS=off)")
+	}
+	if brokerAddr == "" {
+		// Dial the broker via the host's LAN IP (as a discovered agent
+		// would). The agent binds its service relays to the local address of
+		// this connection; using the LAN IP keeps them off loopback, where
+		// they would collide with the daemon-side service forward.
+		if ip, err := netutil.ExternalIP(); err == nil && ip != "" {
+			brokerAddr = net.JoinHostPort(ip, "30660")
+		} else {
+			brokerAddr = "127.0.0.1:30660"
+		}
+	}
+	pachdAddr := os.Getenv("PACHD_ADDRESS")
+	if pachdAddr == "" {
+		pachdAddr = "127.0.0.1:30650"
+	}
+	etcdPort := 2379
+	if p := os.Getenv("PACH_LOCAL_ETCD_PORT"); p != "" {
+		if n, err := strconv.Atoi(p); err == nil {
+			etcdPort = n
+		}
+	}
+	// The agent's scratch dir gets written by docker workers running as
+	// root, so it cannot live under t.TempDir() (cleanup would fail on the
+	// root-owned files); chmod before removing.
+	localDir := filepath.Join(os.TempDir(), "pach-agent-test-"+tu.UniqueString(""))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		err := agent.Run(ctx, agent.Options{
+			BrokerAddr:   brokerAddr,
+			Tags:         []string{tag},
+			LocalDir:     localDir,
+			WorkerBinary: os.Getenv("PACH_WORKER_BINARY"),
+			PachdAddr:    pachdAddr,
+			EtcdPort:     etcdPort,
+			BrokerPort:   30660,
+			Discover:     false,
+			Runtime:      "docker",
+		})
+		if err != nil && ctx.Err() == nil {
+			t.Errorf("broker test agent: %v", err)
+		}
+	}()
+	// Give the agent time to register with the broker before pipelines are
+	// created (a tagged pipeline created too early just retries until it
+	// succeeds, so this is a courtesy, not a correctness requirement).
+	time.Sleep(time.Second)
+	return func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Errorf("broker test agent did not shut down")
+		}
+		exec.Command("chmod", "-R", "0777", localDir).Run()
+		os.RemoveAll(localDir)
+	}
+}
+
+// createTaggedPipeline creates a pipeline whose workers must be placed on a
+// node serving 'tag'. The entrypoint image copies /pfs/in/file to the output
+// dir, so a datum's output file equals its input file.
+func createTaggedPipeline(t *testing.T, c *client.APIClient, name, tag, dataRepo string) {
+	t.Helper()
+	_, err := c.PpsAPIClient.CreatePipeline(context.Background(), &pps.CreatePipelineRequest{
+		Pipeline: client.NewPipeline(name),
+		Transform: &pps.Transform{
+			Image: "pachyderm_entrypoint",
+			Env:   map[string]string{"PACH_NODE_TAG": tag},
+		},
+		ParallelismSpec: &pps.ParallelismSpec{Constant: 1},
+		Input: &pps.Input{Pfs: &pps.PFSInput{
+			Name: "in",
+			Repo: dataRepo,
+			Glob: "/*",
+		}},
+	})
+	require.NoError(t, grpcutil.ScrubGRPC(err))
+}
+
+func TestBrokerRemoteWorker(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration tests in short mode")
+	}
+	tag := tu.UniqueString("brokertag")
+	stop := startBrokerTestAgent(t, tag)
+	defer stop()
+
+	c := tu.GetPachClient(t)
+	dataRepo := tu.UniqueString("TestBrokerRemoteWorker_data")
+	require.NoError(t, c.CreateRepo(dataRepo))
+	commit1, err := c.StartCommit(dataRepo, "master")
+	require.NoError(t, err)
+	_, err = c.PutFile(dataRepo, commit1.ID, "file", strings.NewReader("foo"))
+	require.NoError(t, err)
+	require.NoError(t, c.FinishCommit(dataRepo, commit1.ID))
+
+	pipeline := tu.UniqueString("TestBrokerRemoteWorker")
+	createTaggedPipeline(t, c, pipeline, tag, dataRepo)
+	t.Cleanup(func() {
+		c.DeletePipeline(pipeline, false)
+		c.DeleteRepo(dataRepo, false)
+	})
+
+	commitIter, err := c.FlushCommit([]*pfs.Commit{commit1}, nil)
+	require.NoError(t, err)
+	commitInfos := collectCommitInfos(t, commitIter)
+	require.Equal(t, 1, len(commitInfos))
+
+	// The datum was processed by a broker-placed worker (without a
+	// registered agent the pipeline can never complete).
+	var buf bytes.Buffer
+	require.NoError(t, c.GetFile(pipeline, commitInfos[0].Commit.ID, "file", 0, 0, &buf))
+	require.Equal(t, "foo", buf.String())
+}
+
+func TestBrokerRemoteService(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration tests in short mode")
+	}
+	tag := tu.UniqueString("brokertag")
+	stop := startBrokerTestAgent(t, tag)
+	defer stop()
+
+	c := tu.GetPachClient(t)
+	dataRepo := tu.UniqueString("TestBrokerRemoteService_data")
+	require.NoError(t, c.CreateRepo(dataRepo))
+	commit1, err := c.StartCommit(dataRepo, "master")
+	require.NoError(t, err)
+	_, err = c.PutFile(dataRepo, commit1.ID, "file1", strings.NewReader("foo"))
+	require.NoError(t, err)
+	require.NoError(t, c.FinishCommit(dataRepo, commit1.ID))
+
+	pipeline := tu.UniqueString("TestBrokerRemoteService")
+	_, err = c.PpsAPIClient.CreatePipeline(context.Background(), &pps.CreatePipelineRequest{
+		Pipeline: client.NewPipeline(pipeline),
+		Transform: &pps.Transform{
+			Image: "trinitronx/python-simplehttpserver",
+			Cmd:   []string{"sh"},
+			Stdin: []string{
+				"cd /pfs",
+				"exec python -m SimpleHTTPServer 8000",
+			},
+			Env: map[string]string{"PACH_NODE_TAG": tag},
+		},
+		ParallelismSpec: &pps.ParallelismSpec{Constant: 1},
+		Input:           client.NewPFSInput(dataRepo, "/"),
+		Service: &pps.Service{
+			InternalPort: 8000,
+			ExternalPort: 31800,
+		},
+	})
+	require.NoError(t, grpcutil.ScrubGRPC(err))
+	t.Cleanup(func() {
+		c.DeletePipeline(pipeline, false)
+		c.DeleteRepo(dataRepo, false)
+	})
+
+	// The service must be reachable at the pachd host's external port
+	// through the daemon->node->agent relay chain.
+	clientAddr := c.GetAddress()
+	host, _, err := net.SplitHostPort(clientAddr)
+	require.NoError(t, err)
+	serviceAddr := net.JoinHostPort(host, "31800")
+
+	require.NoError(t, backoff.Retry(func() error {
+		resp, err := http.Get(fmt.Sprintf("http://%s/%s/file1", serviceAddr, dataRepo))
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			return errors.Errorf("GET returned %d", resp.StatusCode)
+		}
+		content, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return err
+		}
+		if string(content) != "foo" {
+			return errors.Errorf("service returned %q, want %q", content, "foo")
+		}
+		return nil
+	}, backoff.NewTestingBackOff()))
+}
+
+func TestBrokerNodeLoss(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration tests in short mode")
+	}
+	c := tu.GetPachClient(t)
+	dataRepo := tu.UniqueString("TestBrokerNodeLoss_data")
+	require.NoError(t, c.CreateRepo(dataRepo))
+	commit1, err := c.StartCommit(dataRepo, "master")
+	require.NoError(t, err)
+	_, err = c.PutFile(dataRepo, commit1.ID, "file", strings.NewReader("foo"))
+	require.NoError(t, err)
+	require.NoError(t, c.FinishCommit(dataRepo, commit1.ID))
+
+	tag := tu.UniqueString("brokertag")
+	pipeline := tu.UniqueString("TestBrokerNodeLoss")
+	// Create the tagged pipeline with no agent registered: the worker cannot
+	// be placed, so the pipeline must go CRASHING (not hang silently).
+	createTaggedPipeline(t, c, pipeline, tag, dataRepo)
+	t.Cleanup(func() {
+		c.DeletePipeline(pipeline, false)
+		c.DeleteRepo(dataRepo, false)
+	})
+
+	require.NoError(t, backoff.Retry(func() error {
+		info, err := c.InspectPipeline(pipeline)
+		if err != nil {
+			return err
+		}
+		if info.State != pps.PipelineState_PIPELINE_CRASHING {
+			return errors.Errorf("pipeline state is %s, want CRASHING", info.State)
+		}
+		return nil
+	}, backoff.NewTestingBackOff()))
+
+	// The node comes back; the daemon must re-place the worker and finish
+	// the job.
+	stop := startBrokerTestAgent(t, tag)
+	defer stop()
+
+	commitIter, err := c.FlushCommit([]*pfs.Commit{commit1}, nil)
+	require.NoError(t, err)
+	commitInfos := collectCommitInfos(t, commitIter)
+	require.Equal(t, 1, len(commitInfos))
+	var buf bytes.Buffer
+	require.NoError(t, c.GetFile(pipeline, commitInfos[0].Commit.ID, "file", 0, 0, &buf))
+	require.Equal(t, "foo", buf.String())
 }
