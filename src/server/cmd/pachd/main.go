@@ -403,6 +403,17 @@ func doLocalMode(config interface{}) (retErr error) {
 		}
 	}()
 	setPachdLogLevel()
+	// In local mode there is no k8s volume mounted at /pach-cache (the
+	// upstream default). Point the daemon's disk cache at the local data
+	// directory, mirroring how the localclient runtime configures workers.
+	if cfg, ok := config.(*serviceenv.PachdFullConfiguration); ok &&
+		(cfg.CacheRoot == "" || cfg.CacheRoot == "/pach-cache") {
+		localDir := os.Getenv("PACH_LOCAL_DIR")
+		if localDir == "" {
+			localDir = os.TempDir()
+		}
+		cfg.CacheRoot = filepath.Join(localDir, "cache")
+	}
 	env := serviceenv.InitServiceEnv(serviceenv.NewConfiguration(config))
 	workerBinary := os.Getenv("PACH_WORKER_BINARY")
 	if workerBinary == "" {
