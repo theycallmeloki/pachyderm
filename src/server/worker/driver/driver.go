@@ -740,21 +740,12 @@ func (d *driver) RunUserCode(
 	if d.uid != nil && d.gid != nil {
 		cmd.SysProcAttr = makeCmdCredentials(*d.uid, *d.gid)
 	}
-<<<<<<< HEAD
 	// By default, the dockerfile will determine the working dir for the container, so if we
 	// couldn't read the container config with docker, don't touch it. If the pipeline or
 	// worker config explicitly sets the value, then override the container working dir.
 	if d.pipelineInfo.Transform.WorkingDir != "" || d.rootDir != "/" {
 		cmd.Dir = filepath.Join(d.rootDir, d.pipelineInfo.Transform.WorkingDir)
 	}
-=======
-	// By default, the dockerfile will determine the working dir for the container, so if we
-	// couldn't read the container config with docker, don't touch it. If the pipeline or
-	// worker config explicitly sets the value, then override the container working dir.
-	if d.pipelineInfo.Transform.WorkingDir != "" || d.rootDir != "/" {
-		cmd.Dir = filepath.Join(d.rootDir, d.pipelineInfo.Transform.WorkingDir)
-	}
->>>>>>> 9e31ecc666 (Don't overwrite the default working dir unnecessarily (#6662))
 	err := cmd.Start()
 	if err != nil {
 		return errors.EnsureStack(err)
