@@ -19,27 +19,30 @@
 //
 // # Suite gating (src/server/pachyderm_test.go vs local mode)
 //
-// Most of the 165-test suite runs against local mode (docker-mode workers
-// restore absolute /pfs paths). The full-suite baseline is green in one
-// invocation (143 pass / 26 skip / 0 fail). Permanently gated tests fall
-// into buckets, each skipped via tu.LocalMode():
+// The 165-test suite runs against local mode (docker-mode workers restore
+// absolute /pfs paths), and the full-suite baseline is green in one
+// invocation. Pipeline services work end to end: the daemon records k8s
+// Service/RC/Pod objects it creates (served from the HTTP API for the test
+// shim's tu.GetKubeClient) and forwards each pipeline service's external
+// port to its worker's container port on loopback (the local stand-in for a
+// k8s NodePort service). Pod specs served to tests carry the full pod
+// template, so pod-reflection tests see what the controller rendered.
 //
-//   - k8s API reflection: assert on pod/service/deployment spec rendering
-//     via tu.GetKubeClient, which local mode serves from an empty in-memory
-//     fake (TestPipelineResourceLimit, TestPipelineResourceLimitDefaults,
-//     TestPipelineResourceRequest, TestSystemResourceRequests, TestPodOpts,
-//     TestPodPatchUnmarshalling, TestMissingPipelineSpec,
-//     TestNoOutputRepoDoesntCrashPPSMaster, TestUpdatePipeline).
+// Remaining permanently gated tests, each skipped via tu.LocalMode():
+//
+//   - pachd restart semantics: TestMissingPipelineSpec,
+//     TestNoOutputRepoDoesntCrashPPSMaster (they delete the pachd pod to
+//     restart it; local mode has no pod to delete).
 //   - k8s scheduling semantics: TestPipelineCrashing (GPU), TestCrashingToStandby.
 //   - auth/enterprise: TestSecretsUnauthenticated, TestLokiLogs (enterprise
 //     activation), and the spout auth subtests (auth disabled in local mode).
-//   - pipeline services: TestService, TestServiceEnvVars, TestUpdatePipeline,
-//     and the ServiceSpout spout subtest (no service ports in local mode).
 //   - environment: TestCronPipeline (upstream bug: cron file paths embed the
-//     machine timezone offset, which PFS path validation rejects).
+//     machine timezone offset, which PFS path validation rejects),
+//     TestSystemResourceRequests (asserts pachd/etcd deployment pods, which
+//     local mode does not deploy).
 //
 // RUN_BAD_TESTS-gated upstream (these all run and pass in local mode when
-// RUN_BAD_TESTS is set): TestPipelineFailure, TestGetLogsWithStats,
+// RUN_BAD_TESTS is set): TestPipelineFailure, TestService, TestGetLogsWithStats,
 // TestChainedPipelinesNoDelay, TestPipelineWithStats*, TestListJobOutput,
 // TestUpdateFailedPipeline, TestDatumStatusRestart, TestGarbageCollection,
 // TestPipelineVersions, TestDeferredProcessing, TestPipelineHistory,
@@ -151,6 +154,11 @@ type Runtime struct {
 	watchers  map[int]chan watch.Event
 	nextWatch int
 
+	// svcForwards maps "ns/name" of a NodePort pipeline service to the TCP
+	// forward that exposes its container port on the host's loopback
+	// interface (the local stand-in for the k8s NodePort service).
+	svcForwards map[string]*tcpForward
+
 	logSrv *httptest.Server
 
 	// dockerBin is the resolved docker CLI path, set when Runtime is docker.
@@ -200,12 +208,13 @@ func NewRuntime(opts Options) (*Runtime, error) {
 		return nil, errors.Errorf("localclient: unknown Runtime %q (want \"process\" or \"docker\")", opts.Runtime)
 	}
 	rt := &Runtime{
-		opts:     opts,
-		rcs:      make(map[string]*rcState),
-		services: make(map[string]*v1.Service),
-		secrets:  make(map[string]*v1.Secret),
-		nextIP:   2, // 127.0.0.1 is the daemon itself; workers start at 127.0.0.2
-		watchers: make(map[int]chan watch.Event),
+		opts:        opts,
+		rcs:         make(map[string]*rcState),
+		services:    make(map[string]*v1.Service),
+		secrets:     make(map[string]*v1.Secret),
+		nextIP:      2, // 127.0.0.1 is the daemon itself; workers start at 127.0.0.2
+		watchers:    make(map[int]chan watch.Event),
+		svcForwards: make(map[string]*tcpForward),
 	}
 	if opts.Runtime == "docker" {
 		bin, err := exec.LookPath("docker")
@@ -375,6 +384,12 @@ func NewClientset(rt *Runtime) *Clientset {
 // Close shuts down the runtime, killing all workers and the log server.
 func (rt *Runtime) Close() {
 	rt.mu.Lock()
+	for key, f := range rt.svcForwards {
+		delete(rt.svcForwards, key)
+		f.Close()
+	}
+	rt.mu.Unlock()
+	rt.mu.Lock()
 	rcs := make([]*rcState, 0, len(rt.rcs))
 	for _, g := range rt.rcs {
 		rcs = append(rcs, g)
@@ -391,6 +406,53 @@ func (rt *Runtime) Close() {
 func (rt *Runtime) serverURL() *url.URL {
 	u, _ := url.Parse(rt.logSrv.URL)
 	return u
+}
+
+// kubeListPrefix is the path prefix for the local-mode k8s object store,
+// served by the daemon's HTTP API so that suite tests running in a separate
+// process (via tu.GetKubeClient) can reflect on the objects the daemon
+// actually created: services, replication controllers, and pods.
+const kubeListPrefix = "/v1/local/kube/"
+
+// KubeHTTPHandler wraps an HTTP handler (the pachd HTTP API) with the
+// local-mode k8s object store. GETs under kubeListPrefix are served from the
+// runtime's in-memory stores; everything else passes through to inner.
+func (rt *Runtime) KubeHTTPHandler(inner http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, kubeListPrefix) {
+			inner.ServeHTTP(w, r)
+			return
+		}
+		kind := strings.TrimPrefix(r.URL.Path, kubeListPrefix)
+		ns := r.URL.Query().Get("namespace")
+		if ns == "" {
+			ns = "default"
+		}
+		opts := metav1.ListOptions{LabelSelector: r.URL.Query().Get("labelSelector")}
+		var (
+			obj interface{}
+			err error
+		)
+		switch kind {
+		case "services":
+			obj, err = rt.listServices(ns, opts)
+		case "rcs":
+			obj, err = rt.listRCs(ns, opts)
+		case "pods":
+			obj, err = rt.listPods(ns, opts)
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(obj); err != nil {
+			log.Warnf("localclient: could not encode kube %s list: %v", kind, err)
+		}
+	})
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -1010,6 +1072,11 @@ func (p *podState) podObj(ns string) *v1.Pod {
 			Labels:      p.group.rc.Spec.Template.ObjectMeta.Labels,
 			Annotations: p.group.rc.Spec.Template.ObjectMeta.Annotations,
 		},
+		// The pod's spec is exactly the RC's pod template spec (that is what
+		// a real pod is created from); serving it lets suite tests that
+		// reflect on pod specs (resources, volumes, podspec overrides) see
+		// what the pipeline controller rendered.
+		Spec: *p.group.rc.Spec.Template.Spec.DeepCopy(),
 		Status: v1.PodStatus{
 			Phase:  phase,
 			PodIP:  p.ip,
@@ -1394,20 +1461,145 @@ func (s *services) List(opts metav1.ListOptions) (*v1.ServiceList, error) {
 }
 
 func (rt *Runtime) createService(ns string, svc *v1.Service) (*v1.Service, error) {
+	// Emulate the k8s API server's defaulting: a service created in
+	// namespace ns is stored with that namespace, and gets a ClusterIP.
+	// In local mode "the cluster" is the daemon's host, so the ClusterIP
+	// is loopback (this is what the pachd HTTP service proxy dials).
+	if svc.Namespace == "" {
+		svc.Namespace = ns
+	}
+	if svc.Spec.ClusterIP == "" {
+		svc.Spec.ClusterIP = "127.0.0.1"
+	}
 	rt.mu.Lock()
-	defer rt.mu.Unlock()
 	key := ns + "/" + svc.Name
 	if _, ok := rt.services[key]; ok {
+		rt.mu.Unlock()
 		return nil, kubeerrors.NewAlreadyExists(schema.GroupResource{Group: "", Resource: "services"}, svc.Name)
 	}
 	rt.services[key] = svc.DeepCopy()
-	return rt.services[key].DeepCopy(), nil
+	rt.mu.Unlock()
+	rt.maybeStartServiceForward(key, svc)
+	rt.mu.Lock()
+	out := rt.services[key].DeepCopy()
+	rt.mu.Unlock()
+	return out, nil
 }
 
 func (rt *Runtime) deleteService(ns, name string) error {
 	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	delete(rt.services, ns+"/"+name)
+	key := ns + "/" + name
+	delete(rt.services, key)
+	if f, ok := rt.svcForwards[key]; ok {
+		delete(rt.svcForwards, key)
+		rt.mu.Unlock()
+		f.Close()
+		return nil
+	}
+	rt.mu.Unlock()
+	return nil
+}
+
+// maybeStartServiceForward exposes a pipeline service's container port on the
+// host's loopback interface, standing in for the k8s NodePort service: the
+// worker container runs with host networking (so its listener is already on
+// the host), and this daemon-side forward makes the pipeline's external port
+// reachable at 127.0.0.1:<ExternalPort>. It only forwards services that carry
+// a "user-port" (pipeline services); the pachyderm-internal service for each
+// pipeline has no user-port and needs no forward.
+func (rt *Runtime) maybeStartServiceForward(key string, svc *v1.Service) {
+	for _, p := range svc.Spec.Ports {
+		if p.Name != "user-port" {
+			continue
+		}
+		externalPort := int(p.Port)
+		internalPort := externalPort
+		if p.TargetPort.IntValue() != 0 {
+			internalPort = p.TargetPort.IntValue()
+		}
+		if externalPort == 0 || internalPort == 0 || externalPort == internalPort {
+			return // nothing to forward (same port is already host-reachable)
+		}
+		rt.mu.Lock()
+		defer rt.mu.Unlock()
+		if _, ok := rt.svcForwards[key]; ok {
+			return
+		}
+		f, err := newTCPForward(externalPort, internalPort)
+		if err != nil {
+			log.Warnf("localclient: could not forward service %s port %d->%d: %v", key, externalPort, internalPort, err)
+			return
+		}
+		rt.svcForwards[key] = f
+		return
+	}
+}
+
+// tcpForward is a small host-side proxy from a fixed loopback port to a
+// worker's listener (which, with host networking, is also on loopback).
+type tcpForward struct {
+	ln     net.Listener
+	done   chan struct{}
+	once   sync.Once
+	target string
+}
+
+func newTCPForward(externalPort, internalPort int) (*tcpForward, error) {
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(externalPort)))
+	if err != nil {
+		return nil, err
+	}
+	f := &tcpForward{
+		ln:     ln,
+		done:   make(chan struct{}),
+		target: net.JoinHostPort("127.0.0.1", strconv.Itoa(internalPort)),
+	}
+	go f.serve()
+	return f, nil
+}
+
+func (f *tcpForward) serve() {
+	for {
+		conn, err := f.ln.Accept()
+		if err != nil {
+			select {
+			case <-f.done:
+				return
+			default:
+				continue // transient accept error; keep serving
+			}
+		}
+		go f.relay(conn)
+	}
+}
+
+func (f *tcpForward) relay(conn net.Conn) {
+	upstream, err := net.Dial("tcp", f.target)
+	if err != nil {
+		conn.Close()
+		return
+	}
+	done := make(chan struct{}, 2)
+	go func() {
+		io.Copy(upstream, conn)
+		upstream.Close()
+		done <- struct{}{}
+	}()
+	go func() {
+		io.Copy(conn, upstream)
+		conn.Close()
+		done <- struct{}{}
+	}()
+	<-done
+	upstream.Close()
+	conn.Close()
+}
+
+func (f *tcpForward) Close() error {
+	f.once.Do(func() {
+		close(f.done)
+		f.ln.Close()
+	})
 	return nil
 }
 

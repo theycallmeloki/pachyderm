@@ -2961,9 +2961,6 @@ func TestUpdatePipeline(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
 	}
-	if tu.LocalMode() {
-		t.Skip("pipeline services are not supported in local mode")
-	}
 
 	c := tu.GetPachClient(t)
 	require.NoError(t, c.DeleteAll())
@@ -5030,7 +5027,7 @@ func TestSystemResourceRequests(t *testing.T) {
 		t.Skip("Skipping integration tests in short mode")
 	}
 	if tu.LocalMode() {
-		t.Skip("k8s pod specs are not served in local mode")
+		t.Skip("pachd/etcd pods are not deployed in local mode")
 	}
 	kubeClient := tu.GetKubeClient(t)
 
@@ -5089,9 +5086,6 @@ func TestSystemResourceRequests(t *testing.T) {
 func TestPipelineResourceRequest(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
-	}
-	if tu.LocalMode() {
-		t.Skip("k8s pod specs are not served in local mode")
 	}
 
 	c := tu.GetPachClient(t)
@@ -5165,9 +5159,6 @@ func TestPipelineResourceLimit(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
 	}
-	if tu.LocalMode() {
-		t.Skip("k8s pod specs are not served in local mode")
-	}
 
 	c := tu.GetPachClient(t)
 	require.NoError(t, c.DeleteAll())
@@ -5235,9 +5226,6 @@ func TestPipelineResourceLimit(t *testing.T) {
 func TestPipelineResourceLimitDefaults(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
-	}
-	if tu.LocalMode() {
-		t.Skip("k8s pod specs are not served in local mode")
 	}
 
 	c := tu.GetPachClient(t)
@@ -5427,9 +5415,6 @@ func TestPipelineCrashing(t *testing.T) {
 func TestPodOpts(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
-	}
-	if tu.LocalMode() {
-		t.Skip("k8s pod specs are not served in local mode")
 	}
 
 	c := tu.GetPachClient(t)
@@ -8243,9 +8228,6 @@ func TestService(t *testing.T) {
 	if os.Getenv("RUN_BAD_TESTS") == "" {
 		t.Skip("Skipping because RUN_BAD_TESTS was empty")
 	}
-	if tu.LocalMode() {
-		t.Skip("pipeline services are not supported in local mode")
-	}
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
 	}
@@ -8406,9 +8388,6 @@ func TestService(t *testing.T) {
 func TestServiceEnvVars(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
-	}
-	if tu.LocalMode() {
-		t.Skip("pipeline services are not supported in local mode")
 	}
 	c := tu.GetPachClient(t)
 	require.NoError(t, c.DeleteAll())
@@ -11453,9 +11432,6 @@ func testSpout(t *testing.T, usePachctl bool) {
 		require.NoError(t, c.DeleteAll())
 	})
 	t.Run("ServiceSpout", func(t *testing.T) {
-		if tu.LocalMode() {
-			t.Skip("pipeline services are not supported in local mode")
-		}
 		dataRepo := tu.UniqueString("TestServiceSpout_data")
 		require.NoError(t, c.CreateRepo(dataRepo))
 
@@ -12110,7 +12086,7 @@ func TestPipelineHistory(t *testing.T) {
 
 func TestMissingPipelineSpec(t *testing.T) {
 	if tu.LocalMode() {
-		t.Skip("k8s deployments are not served in local mode")
+		t.Skip("restarting pachd (pod deletion) is not supported in local mode")
 	}
 	c := tu.GetPachClient(t)
 	require.NoError(t, c.DeleteAll())
@@ -12275,7 +12251,7 @@ func TestNoOutputRepoDoesntCrashPPSMaster(t *testing.T) {
 		t.Skip("Skipping because RUN_BAD_TESTS was empty")
 	}
 	if tu.LocalMode() {
-		t.Skip("k8s pod state is not served in local mode")
+		t.Skip("restarting pachd (pod deletion) is not supported in local mode")
 	}
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
@@ -12612,9 +12588,6 @@ func TestExtractPipeline(t *testing.T) {
 func TestPodPatchUnmarshalling(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
-	}
-	if tu.LocalMode() {
-		t.Skip("k8s pod specs are not served in local mode")
 	}
 
 	c := tu.GetPachClient(t)

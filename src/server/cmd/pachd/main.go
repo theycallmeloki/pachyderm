@@ -400,7 +400,7 @@ func doFullMode(config interface{}) (retErr error) {
 	}()
 	setPachdLogLevel()
 	env := serviceenv.InitWithKube(serviceenv.NewConfiguration(config))
-	return runFullMode(env)
+	return runFullMode(env, nil)
 }
 
 // doLocalMode runs the full pachd server without Kubernetes: etcd is embedded
@@ -451,7 +451,7 @@ func doLocalMode(config interface{}) (retErr error) {
 		rt.Close()
 		os.Exit(0)
 	}()
-	return runFullMode(env)
+	return runFullMode(env, rt)
 }
 
 // setPachdLogLevel applies the LOG_LEVEL env var to the logrus logger and
@@ -478,8 +478,10 @@ func setPachdLogLevel() {
 
 // runFullMode sets up and runs every pachd server (external gRPC, internal
 // gRPC, HTTP, githook, S3 gateway, prometheus). It is shared by k8s mode
-// (doFullMode) and local mode (doLocalMode).
-func runFullMode(env *serviceenv.ServiceEnv) (retErr error) {
+// (doFullMode) and local mode (doLocalMode). In local mode rt is the
+// in-process k8s runtime; its object store is served from the HTTP API so
+// tests can reflect on it.
+func runFullMode(env *serviceenv.ServiceEnv, rt *localclient.Runtime) (retErr error) {
 	debug.SetGCPercent(env.GCPercent)
 	if env.EtcdPrefix == "" {
 		env.EtcdPrefix = col.DefaultPrefix
@@ -863,6 +865,12 @@ func runFullMode(env *serviceenv.ServiceEnv) (retErr error) {
 		httpServer, err := pach_http.NewHTTPServer(address)
 		if err != nil {
 			return err
+		}
+		if rt != nil {
+			// Local mode: serve the in-memory k8s object store (services,
+			// RCs, pods) from the HTTP API so suite tests can reflect on
+			// the resources the daemon actually created.
+			httpServer = rt.KubeHTTPHandler(httpServer)
 		}
 		server := http.Server{
 			Addr:    fmt.Sprintf(":%v", env.HTTPPort),

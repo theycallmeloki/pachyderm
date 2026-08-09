@@ -2,7 +2,10 @@ package testutil
 
 import (
 	"encoding/json"
+	"io/ioutil"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"testing"
 	"time"
@@ -13,14 +16,18 @@ import (
 	"github.com/pachyderm/pachyderm/src/server/pkg/backoff"
 
 	apps "k8s.io/api/apps/v1"
+	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	v1 "k8s.io/api/core/v1"
+	policy "k8s.io/api/policy/v1beta1"
+	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	kube "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	kubeCore "k8s.io/client-go/kubernetes/typed/core/v1"
-	"k8s.io/client-go/rest"
+	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
@@ -44,11 +51,11 @@ func GetKubeClient(t testing.TB) kube.Interface {
 			return &localKubeClient{Clientset: fake.NewSimpleClientset(), c: pachClient}
 		}
 	}
-	var config *rest.Config
+	var config *restclient.Config
 	var err error
 	host := os.Getenv("KUBERNETES_SERVICE_HOST")
 	if host != "" {
-		config, err = rest.InClusterConfig()
+		config, err = restclient.InClusterConfig()
 	} else {
 		rules := clientcmd.NewDefaultClientConfigLoadingRules()
 		kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules,
@@ -92,6 +99,240 @@ type localCoreV1 struct {
 
 func (l *localCoreV1) Secrets(ns string) kubeCore.SecretInterface {
 	return &proxySecrets{c: l.c, ns: ns}
+}
+
+func (l *localCoreV1) Services(ns string) kubeCore.ServiceInterface {
+	return &proxyServices{kubeObjectStore: kubeObjectStore{kind: "services", ns: ns}}
+}
+
+func (l *localCoreV1) ReplicationControllers(ns string) kubeCore.ReplicationControllerInterface {
+	return &proxyRCs{kubeObjectStore: kubeObjectStore{kind: "rcs", ns: ns}}
+}
+
+func (l *localCoreV1) Pods(ns string) kubeCore.PodInterface {
+	return &proxyPods{kubeObjectStore: kubeObjectStore{kind: "pods", ns: ns}}
+}
+
+// localKubeHTTPBase is the daemon HTTP API URL that serves the local-mode
+// k8s object store (services, RCs, pods) that the daemon itself created.
+func localKubeHTTPBase() string {
+	host, _, err := net.SplitHostPort(os.Getenv("PACHD_ADDRESS"))
+	if err != nil {
+		return ""
+	}
+	port := os.Getenv("PACHD_SERVICE_PORT_API_HTTP_PORT")
+	if port == "" {
+		port = "30652" // pachd's HTTP API port (see cmd/pachd/main.go)
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/v1/local/kube/"
+}
+
+// kubeObjectStore is the read-only HTTP client for the daemon's in-memory
+// k8s object store. It is read-only by design: suite tests create resources
+// through the pps API, which lands in the same store the daemon serves.
+type kubeObjectStore struct {
+	kind string
+	ns   string
+}
+
+func (p *kubeObjectStore) list(opts metav1.ListOptions) ([]byte, error) {
+	u := localKubeHTTPBase() + p.kind + "?namespace=" + url.QueryEscape(p.ns)
+	if opts.LabelSelector != "" {
+		u += "&labelSelector=" + url.QueryEscape(opts.LabelSelector)
+	}
+	resp, err := http.Get(u)
+	if err != nil {
+		return nil, errors.Wrapf(err, "could not list %s from local kube store", p.kind)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, errors.Errorf("local kube store returned %d for %s list", resp.StatusCode, p.kind)
+	}
+	return ioutil.ReadAll(resp.Body)
+}
+
+func (p *kubeObjectStore) notSupported(verb string) error {
+	return errors.Errorf("local kube store does not support %s of %s from the test shim", verb, p.kind)
+}
+
+func (p *kubeObjectStore) notFound(name string) error {
+	return kubeerrors.NewNotFound(schema.GroupResource{Group: "", Resource: p.kind}, name)
+}
+
+// errRequest returns a rest client request that fails cleanly if executed,
+// for PodInterface/ServiceExpansion methods that the suite never calls in
+// local mode (pod logs go through the pps GetLogs API).
+func errRequest() *restclient.Request {
+	c, err := restclient.UnversionedRESTClientFor(&restclient.Config{Host: "http://127.0.0.1:1"})
+	if err != nil {
+		panic(err) // unreachable: the config is static
+	}
+	return c.Get()
+}
+
+// proxyServices implements v1core.ServiceInterface against the daemon store.
+type proxyServices struct {
+	kubeObjectStore
+}
+
+func (s *proxyServices) Create(*v1.Service) (*v1.Service, error) {
+	return nil, s.notSupported("creating")
+}
+func (s *proxyServices) Update(*v1.Service) (*v1.Service, error) {
+	return nil, s.notSupported("updating")
+}
+func (s *proxyServices) UpdateStatus(*v1.Service) (*v1.Service, error) {
+	return nil, s.notSupported("updating")
+}
+func (s *proxyServices) Delete(name string, _ *metav1.DeleteOptions) error {
+	return s.notFound(name)
+}
+func (s *proxyServices) Get(name string, _ metav1.GetOptions) (*v1.Service, error) {
+	list, err := s.List(metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	for i := range list.Items {
+		if list.Items[i].Name == name {
+			return &list.Items[i], nil
+		}
+	}
+	return nil, s.notFound(name)
+}
+func (s *proxyServices) List(opts metav1.ListOptions) (*v1.ServiceList, error) {
+	raw, err := s.list(opts)
+	if err != nil {
+		return nil, err
+	}
+	var out v1.ServiceList
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+func (s *proxyServices) Watch(_ metav1.ListOptions) (watch.Interface, error) {
+	return watch.NewEmptyWatch(), nil
+}
+func (s *proxyServices) Patch(name string, _ types.PatchType, _ []byte, _ ...string) (*v1.Service, error) {
+	return nil, s.notFound(name)
+}
+func (s *proxyServices) ProxyGet(_, _, _, _ string, _ map[string]string) restclient.ResponseWrapper {
+	return errRequest()
+}
+
+// proxyRCs implements v1core.ReplicationControllerInterface.
+type proxyRCs struct {
+	kubeObjectStore
+}
+
+func (r *proxyRCs) Create(*v1.ReplicationController) (*v1.ReplicationController, error) {
+	return nil, r.notSupported("creating")
+}
+func (r *proxyRCs) Update(*v1.ReplicationController) (*v1.ReplicationController, error) {
+	return nil, r.notSupported("updating")
+}
+func (r *proxyRCs) UpdateStatus(*v1.ReplicationController) (*v1.ReplicationController, error) {
+	return nil, r.notSupported("updating")
+}
+func (r *proxyRCs) Delete(name string, _ *metav1.DeleteOptions) error {
+	return r.notFound(name)
+}
+func (r *proxyRCs) DeleteCollection(_ *metav1.DeleteOptions, _ metav1.ListOptions) error {
+	return r.notSupported("deleting")
+}
+func (r *proxyRCs) Get(name string, _ metav1.GetOptions) (*v1.ReplicationController, error) {
+	list, err := r.List(metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	for i := range list.Items {
+		if list.Items[i].Name == name {
+			return &list.Items[i], nil
+		}
+	}
+	return nil, r.notFound(name)
+}
+func (r *proxyRCs) List(opts metav1.ListOptions) (*v1.ReplicationControllerList, error) {
+	raw, err := r.list(opts)
+	if err != nil {
+		return nil, err
+	}
+	var out v1.ReplicationControllerList
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+func (r *proxyRCs) Watch(_ metav1.ListOptions) (watch.Interface, error) {
+	return watch.NewEmptyWatch(), nil
+}
+func (r *proxyRCs) Patch(name string, _ types.PatchType, _ []byte, _ ...string) (*v1.ReplicationController, error) {
+	return nil, r.notFound(name)
+}
+func (r *proxyRCs) GetScale(string, metav1.GetOptions) (*autoscalingv1.Scale, error) {
+	return nil, r.notSupported("getting scale of")
+}
+func (r *proxyRCs) UpdateScale(string, *autoscalingv1.Scale) (*autoscalingv1.Scale, error) {
+	return nil, r.notSupported("updating scale of")
+}
+
+// proxyPods implements v1core.PodInterface.
+type proxyPods struct {
+	kubeObjectStore
+}
+
+func (p *proxyPods) Create(*v1.Pod) (*v1.Pod, error) {
+	return nil, p.notSupported("creating")
+}
+func (p *proxyPods) Update(*v1.Pod) (*v1.Pod, error) {
+	return nil, p.notSupported("updating")
+}
+func (p *proxyPods) UpdateStatus(*v1.Pod) (*v1.Pod, error) {
+	return nil, p.notSupported("updating")
+}
+func (p *proxyPods) Delete(name string, _ *metav1.DeleteOptions) error {
+	return p.notFound(name)
+}
+func (p *proxyPods) DeleteCollection(_ *metav1.DeleteOptions, _ metav1.ListOptions) error {
+	return p.notSupported("deleting")
+}
+func (p *proxyPods) Get(name string, _ metav1.GetOptions) (*v1.Pod, error) {
+	list, err := p.List(metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	for i := range list.Items {
+		if list.Items[i].Name == name {
+			return &list.Items[i], nil
+		}
+	}
+	return nil, p.notFound(name)
+}
+func (p *proxyPods) List(opts metav1.ListOptions) (*v1.PodList, error) {
+	raw, err := p.list(opts)
+	if err != nil {
+		return nil, err
+	}
+	var out v1.PodList
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+func (p *proxyPods) Watch(_ metav1.ListOptions) (watch.Interface, error) {
+	return watch.NewEmptyWatch(), nil
+}
+func (p *proxyPods) Patch(name string, _ types.PatchType, _ []byte, _ ...string) (*v1.Pod, error) {
+	return nil, p.notFound(name)
+}
+func (p *proxyPods) Bind(*v1.Binding) error {
+	return p.notSupported("binding")
+}
+func (p *proxyPods) Evict(*policy.Eviction) error {
+	return p.notSupported("evicting")
+}
+func (p *proxyPods) GetLogs(string, *v1.PodLogOptions) *restclient.Request {
+	return errRequest()
 }
 
 // proxySecrets implements v1core.SecretInterface against the pps Secret API.
