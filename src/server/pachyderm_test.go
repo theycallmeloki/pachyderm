@@ -30,7 +30,6 @@ import (
 	globlib "github.com/pachyderm/ohmyglob"
 	"github.com/pachyderm/pachyderm/src/client"
 	"github.com/pachyderm/pachyderm/src/client/auth"
-	"github.com/pachyderm/pachyderm/src/client/enterprise"
 	"github.com/pachyderm/pachyderm/src/client/pfs"
 	"github.com/pachyderm/pachyderm/src/client/pkg/errors"
 	"github.com/pachyderm/pachyderm/src/client/pkg/require"
@@ -4769,17 +4768,15 @@ func TestLokiLogs(t *testing.T) {
 		t.Skip("Skipping integration tests in short mode")
 	}
 	if tu.LocalMode() {
-		t.Skip("enterprise activation is not supported in local mode")
+		t.Skip("loki logging is not configured in local mode")
 	}
 	c := tu.GetPachClient(t)
 	require.NoError(t, c.DeleteAll())
-	_, err := c.Enterprise.Activate(context.Background(),
-		&enterprise.ActivateRequest{ActivationCode: tu.GetTestEnterpriseCode(t)})
 	// create repos
-	require.NoError(t, err)
 	dataRepo := tu.UniqueString("data")
 	require.NoError(t, c.CreateRepo(dataRepo))
 	numFiles := 10
+	var err error
 	for i := 0; i < numFiles; i++ {
 		_, err = c.PutFile(dataRepo, "master", fmt.Sprintf("file-%d", i), strings.NewReader("foo\n"))
 		require.NoError(t, err)

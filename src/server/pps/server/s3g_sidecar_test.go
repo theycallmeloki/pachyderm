@@ -76,9 +76,6 @@ func initPachClient(t testing.TB) (*client.APIClient, string) {
 		return c, ""
 	}
 
-	// Activate Pachyderm Enterprise (if it's not already active)
-	require.NoError(t, tu.ActivateEnterprise(t, c))
-
 	activateResp, err := c.AuthAPIClient.Activate(context.Background(),
 		&auth.ActivateRequest{Subject: "robot:admin"},
 	)

@@ -15,7 +15,6 @@ import (
 
 	"github.com/pachyderm/pachyderm/src/client"
 	"github.com/pachyderm/pachyderm/src/client/auth"
-	"github.com/pachyderm/pachyderm/src/client/enterprise"
 	"github.com/pachyderm/pachyderm/src/client/pfs"
 	"github.com/pachyderm/pachyderm/src/client/pkg/errors"
 	"github.com/pachyderm/pachyderm/src/client/pkg/require"
@@ -100,8 +99,7 @@ func TestActivate(t *testing.T) {
 	tu.DeleteAll(t)
 	defer tu.DeleteAll(t)
 	// Get anonymous client (this will activate auth, which is about to be
-	// deactivated, but it also activates Pacyderm enterprise, which is needed for
-	// this test to pass)
+	// deactivated)
 	adminClient := tu.GetAuthenticatedPachClient(t, tu.AdminUser)
 
 	_, err := adminClient.Deactivate(adminClient.Ctx(), &auth.DeactivateRequest{})
@@ -129,8 +127,7 @@ func TestActivateKnownToken(t *testing.T) {
 	tu.DeleteAll(t)
 	defer tu.DeleteAll(t)
 	// Get anonymous client (this will activate auth, which is about to be
-	// deactivated, but it also activates Pacyderm enterprise, which is needed for
-	// this test to pass)
+	// deactivated)
 	adminClient := tu.GetAuthenticatedPachClient(t, tu.AdminUser)
 
 	token := "iamroot"
@@ -833,355 +830,7 @@ func TestPreActivationPipelinesKeepRunningAfterActivation(t *testing.T) {
 	})
 }
 
-func TestExpirationRepoOnlyAccessibleToAdmins(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration tests in short mode")
-	}
-	tu.DeleteAll(t)
-	defer tu.DeleteAll(t)
-	alice := tu.UniqueString("alice")
-	aliceClient, adminClient := tu.GetAuthenticatedPachClient(t, alice), tu.GetAuthenticatedPachClient(t, tu.AdminUser)
 
-	// alice creates a repo
-	repo := tu.UniqueString("TestExpirationRepoOnlyAccessibleToAdmins")
-	require.NoError(t, aliceClient.CreateRepo(repo))
-
-	// alice creates a commit
-	commit, err := aliceClient.StartCommit(repo, "master")
-	require.NoError(t, err)
-	_, err = aliceClient.PutFile(repo, commit.ID, "/file1", strings.NewReader("test data"))
-	require.NoError(t, err)
-	require.NoError(t, aliceClient.FinishCommit(repo, commit.ID))
-	require.Equal(t, 1, CommitCnt(t, aliceClient, repo))
-
-	// Make current enterprise token expire
-	adminClient.Enterprise.Activate(adminClient.Ctx(),
-		&enterprise.ActivateRequest{
-			ActivationCode: tu.GetTestEnterpriseCode(t),
-			Expires:        TSProtoOrDie(t, time.Now().Add(-30*time.Second)),
-		})
-	// wait for Enterprise token to expire
-	require.NoError(t, backoff.Retry(func() error {
-		resp, err := adminClient.Enterprise.GetState(adminClient.Ctx(),
-			&enterprise.GetStateRequest{})
-		if err != nil {
-			return err
-		}
-		if resp.State == enterprise.State_ACTIVE {
-			return errors.New("Pachyderm Enterprise is still active")
-		}
-		return nil
-	}, backoff.NewTestingBackOff()))
-
-	// now alice can't read from the repo
-	buf := &bytes.Buffer{}
-	err = aliceClient.GetFile(repo, "master", "/file1", 0, 0, buf)
-	require.YesError(t, err)
-	require.Matches(t, "not active", err.Error())
-
-	// alice can't write to the repo
-	_, err = aliceClient.StartCommit(repo, "master")
-	require.YesError(t, err)
-	require.Matches(t, "not active", err.Error())
-	require.Equal(t, 1, CommitCnt(t, adminClient, repo)) // check that no commits were created
-
-	// alice can't update the ACL
-	_, err = aliceClient.SetScope(aliceClient.Ctx(), &auth.SetScopeRequest{
-		Repo:     repo,
-		Username: "carol",
-		Scope:    auth.Scope_READER,
-	})
-	require.YesError(t, err)
-	require.Matches(t, "not active", err.Error())
-	// We don't delete the ACL because the user might re-enable enterprise pachyderm
-	require.Equal(t, entries(alice, "owner"), getACL(t, adminClient, repo)) // check that ACL wasn't updated
-
-	// alice also can't re-authenticate
-	_, err = aliceClient.Authenticate(context.Background(),
-		&auth.AuthenticateRequest{GitHubToken: alice})
-	require.YesError(t, err)
-	require.Matches(t, "not active", err.Error())
-
-	// admin can read from the repo
-	buf.Reset()
-	require.NoError(t, adminClient.GetFile(repo, "master", "/file1", 0, 0, buf))
-	require.Matches(t, "test data", buf.String())
-
-	// admin can write to the repo
-	commit, err = adminClient.StartCommit(repo, "master")
-	require.NoError(t, err)
-	_, err = adminClient.PutFile(repo, commit.ID, "/file2", strings.NewReader("test data"))
-	require.NoError(t, err)
-	require.NoError(t, adminClient.FinishCommit(repo, commit.ID))
-	require.Equal(t, 2, CommitCnt(t, adminClient, repo)) // check that a new commit was created
-
-	// admin can update the repo's ACL
-	_, err = adminClient.SetScope(adminClient.Ctx(), &auth.SetScopeRequest{
-		Repo:     repo,
-		Username: "carol",
-		Scope:    auth.Scope_READER,
-	})
-	require.NoError(t, err)
-	// check that ACL was updated
-	require.ElementsEqual(t,
-		entries(alice, "owner", "carol", "reader"), getACL(t, adminClient, repo))
-
-	// Re-enable enterprise
-	year := 365 * 24 * time.Hour
-	adminClient.Enterprise.Activate(adminClient.Ctx(),
-		&enterprise.ActivateRequest{
-			ActivationCode: tu.GetTestEnterpriseCode(t),
-			// This will stop working some time in 2026
-			Expires: TSProtoOrDie(t, time.Now().Add(year)),
-		})
-	// wait for Enterprise token to re-enable
-	require.NoError(t, backoff.Retry(func() error {
-		resp, err := adminClient.Enterprise.GetState(adminClient.Ctx(),
-			&enterprise.GetStateRequest{})
-		if err != nil {
-			return err
-		}
-		if resp.State != enterprise.State_ACTIVE {
-			return errors.New("Pachyderm Enterprise is still expired")
-		}
-		return nil
-	}, backoff.NewTestingBackOff()))
-
-	// alice can now re-authenticate
-	resp, err := aliceClient.Authenticate(context.Background(),
-		&auth.AuthenticateRequest{GitHubToken: alice})
-	require.NoError(t, err)
-	aliceClient.SetAuthToken(resp.PachToken)
-
-	// alice can read from the repo again
-	buf = &bytes.Buffer{}
-	require.NoError(t, aliceClient.GetFile(repo, "master", "/file1", 0, 0, buf))
-	require.Matches(t, "test data", buf.String())
-
-	// alice can write to the repo again
-	commit, err = aliceClient.StartCommit(repo, "master")
-	require.NoError(t, err)
-	_, err = aliceClient.PutFile(repo, commit.ID, "/file3", strings.NewReader("test data"))
-	require.NoError(t, err)
-	require.NoError(t, aliceClient.FinishCommit(repo, commit.ID))
-	require.Equal(t, 3, CommitCnt(t, aliceClient, repo)) // check that a new commit was created
-
-	// alice can update the ACL again
-	_, err = aliceClient.SetScope(aliceClient.Ctx(), &auth.SetScopeRequest{
-		Repo:     repo,
-		Username: "carol",
-		Scope:    auth.Scope_WRITER,
-	})
-	require.NoError(t, err)
-	// check that ACL was updated
-	require.ElementsEqual(t,
-		entries(alice, "owner", "carol", "writer"), getACL(t, adminClient, repo))
-}
-
-func TestPipelinesRunAfterExpiration(t *testing.T) {
-	if os.Getenv("RUN_BAD_TESTS") == "" {
-		t.Skip("Skipping because RUN_BAD_TESTS was empty")
-	}
-	if testing.Short() {
-		t.Skip("Skipping integration tests in short mode")
-	}
-	tu.DeleteAll(t)
-	defer tu.DeleteAll(t)
-	alice := tu.UniqueString("alice")
-	aliceClient, adminClient := tu.GetAuthenticatedPachClient(t, alice), tu.GetAuthenticatedPachClient(t, tu.AdminUser)
-
-	// alice creates a repo
-	repo := tu.UniqueString("TestPipelinesRunAfterExpiration")
-	require.NoError(t, aliceClient.CreateRepo(repo))
-	require.Equal(t, entries(alice, "owner"), getACL(t, aliceClient, repo))
-
-	// alice creates a pipeline
-	pipeline := tu.UniqueString("alice-pipeline")
-	require.NoError(t, aliceClient.CreatePipeline(
-		pipeline,
-		"", // default image: ubuntu:14.04
-		[]string{"bash"},
-		[]string{fmt.Sprintf("cp /pfs/%s/* /pfs/out/", repo)},
-		&pps.ParallelismSpec{Constant: 1},
-		client.NewPFSInput(repo, "/*"),
-		"",    // default output branch: master
-		false, // no update
-	))
-	require.OneOfEquals(t, pipeline, PipelineNames(t, aliceClient))
-	// check that alice owns the output repo too,
-	require.ElementsEqual(t,
-		entries(alice, "owner", pl(pipeline), "writer"), getACL(t, aliceClient, pipeline))
-
-	// Make sure alice's pipeline runs successfully
-	commit, err := aliceClient.StartCommit(repo, "master")
-	require.NoError(t, err)
-	_, err = aliceClient.PutFile(repo, commit.ID, tu.UniqueString("/file1"),
-		strings.NewReader("test data"))
-	require.NoError(t, err)
-	require.NoError(t, aliceClient.FinishCommit(repo, commit.ID))
-	iter, err := aliceClient.FlushCommit(
-		[]*pfs.Commit{commit},
-		[]*pfs.Repo{{Name: pipeline}},
-	)
-	require.NoError(t, err)
-	require.NoErrorWithinT(t, 60*time.Second, func() error {
-		_, err := iter.Next()
-		return err
-	})
-
-	// Make current enterprise token expire
-	adminClient.Enterprise.Activate(adminClient.Ctx(),
-		&enterprise.ActivateRequest{
-			ActivationCode: tu.GetTestEnterpriseCode(t),
-			Expires:        TSProtoOrDie(t, time.Now().Add(-30*time.Second)),
-		})
-	// wait for Enterprise token to expire
-	require.NoError(t, backoff.Retry(func() error {
-		resp, err := adminClient.Enterprise.GetState(adminClient.Ctx(),
-			&enterprise.GetStateRequest{})
-		if err != nil {
-			return err
-		}
-		if resp.State == enterprise.State_ACTIVE {
-			return errors.New("Pachyderm Enterprise is still active")
-		}
-		return nil
-	}, backoff.NewTestingBackOff()))
-
-	// Make sure alice's pipeline still runs successfully
-	commit, err = adminClient.StartCommit(repo, "master")
-	require.NoError(t, err)
-	_, err = adminClient.PutFile(repo, commit.ID, tu.UniqueString("/file2"),
-		strings.NewReader("test data"))
-	require.NoError(t, err)
-	require.NoError(t, adminClient.FinishCommit(repo, commit.ID))
-	iter, err = adminClient.FlushCommit(
-		[]*pfs.Commit{commit},
-		[]*pfs.Repo{{Name: pipeline}},
-	)
-	require.NoError(t, err)
-	require.NoErrorWithinT(t, 60*time.Second, func() error {
-		_, err := iter.Next()
-		return err
-	})
-}
-
-// Tests that GetAcl, SetAcl, GetScope, and SetScope all respect expired
-// Enterprise tokens (i.e. reject non-admin requests once the token is expired,
-// and allow admin requests)
-func TestGetSetScopeAndAclWithExpiredToken(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration tests in short mode")
-	}
-	tu.DeleteAll(t)
-	defer tu.DeleteAll(t)
-	alice := tu.UniqueString("alice")
-	aliceClient, adminClient := tu.GetAuthenticatedPachClient(t, alice), tu.GetAuthenticatedPachClient(t, tu.AdminUser)
-
-	// alice creates a repo
-	repo := tu.UniqueString("TestGetSetScopeAndAclWithExpiredToken")
-	require.NoError(t, aliceClient.CreateRepo(repo))
-	require.Equal(t, entries(alice, "owner"), getACL(t, aliceClient, repo))
-
-	// Make current enterprise token expire
-	adminClient.Enterprise.Activate(adminClient.Ctx(),
-		&enterprise.ActivateRequest{
-			ActivationCode: tu.GetTestEnterpriseCode(t),
-			Expires:        TSProtoOrDie(t, time.Now().Add(-30*time.Second)),
-		})
-	// wait for Enterprise token to expire
-	require.NoError(t, backoff.Retry(func() error {
-		resp, err := adminClient.Enterprise.GetState(adminClient.Ctx(),
-			&enterprise.GetStateRequest{})
-		if err != nil {
-			return err
-		}
-		if resp.State == enterprise.State_ACTIVE {
-			return errors.New("Pachyderm Enterprise is still active")
-		}
-		return nil
-	}, backoff.NewTestingBackOff()))
-
-	// alice can't call GetScope on repo, even though she owns it
-	_, err := aliceClient.GetScope(aliceClient.Ctx(), &auth.GetScopeRequest{
-		Repos: []string{repo},
-	})
-	require.YesError(t, err)
-	require.Matches(t, "not active", err.Error())
-
-	// alice can't call SetScope on repo
-	_, err = aliceClient.SetScope(aliceClient.Ctx(), &auth.SetScopeRequest{
-		Repo:     repo,
-		Username: "carol",
-		Scope:    auth.Scope_READER,
-	})
-	require.YesError(t, err)
-	require.Matches(t, "not active", err.Error())
-	require.Equal(t, entries(alice, "owner"), getACL(t, adminClient, repo))
-
-	// alice can't call GetAcl on repo
-	_, err = aliceClient.GetACL(aliceClient.Ctx(), &auth.GetACLRequest{
-		Repo: repo,
-	})
-	require.YesError(t, err)
-	require.Matches(t, "not active", err.Error())
-
-	// alice can't call GetAcl on repo
-	_, err = aliceClient.SetACL(aliceClient.Ctx(), &auth.SetACLRequest{
-		Repo: repo,
-		Entries: []*auth.ACLEntry{
-			{Username: alice, Scope: auth.Scope_OWNER},
-			{Username: "carol", Scope: auth.Scope_READER},
-		},
-	})
-	require.YesError(t, err)
-	require.Matches(t, "not active", err.Error())
-	require.Equal(t, entries(alice, "owner"), getACL(t, adminClient, repo))
-
-	// admin *can* call GetScope on repo
-	resp, err := adminClient.GetScope(adminClient.Ctx(), &auth.GetScopeRequest{
-		Repos: []string{repo},
-	})
-	require.NoError(t, err)
-	require.Equal(t, []auth.Scope{auth.Scope_NONE}, resp.Scopes)
-
-	// admin can call SetScope on repo
-	_, err = adminClient.SetScope(adminClient.Ctx(), &auth.SetScopeRequest{
-		Repo:     repo,
-		Username: "carol",
-		Scope:    auth.Scope_READER,
-	})
-	require.NoError(t, err)
-	require.ElementsEqual(t,
-		entries(alice, "owner", "carol", "reader"), getACL(t, adminClient, repo))
-
-	// admin can call GetAcl on repo
-	aclResp, err := adminClient.GetACL(adminClient.Ctx(), &auth.GetACLRequest{
-		Repo: repo,
-	})
-	require.NoError(t, err)
-	aclEntries := make([]aclEntry, 0, len(aclResp.Entries))
-	for _, e := range aclResp.Entries {
-		aclEntries = append(aclEntries, aclEntry{
-			Username: e.Username,
-			Scope:    e.Scope,
-		})
-	}
-	require.ElementsEqual(t,
-		entries(alice, "owner", "carol", "reader"), aclEntries)
-
-	// admin can call SetAcl on repo
-	_, err = adminClient.SetACL(adminClient.Ctx(), &auth.SetACLRequest{
-		Repo: repo,
-		Entries: []*auth.ACLEntry{
-			{Username: alice, Scope: auth.Scope_OWNER},
-			{Username: "carol", Scope: auth.Scope_WRITER},
-		},
-	})
-	require.NoError(t, err)
-	require.ElementsEqual(t,
-		entries(alice, "owner", "carol", "writer"), getACL(t, adminClient, repo))
-}
 
 // TestAdminWhoAmI tests that when an admin calls WhoAmI(), the ClusterRoles reflects their admin roles
 func TestAdminWhoAmI(t *testing.T) {
@@ -1832,9 +1481,6 @@ func TestActivateAsRobotUser(t *testing.T) {
 	defer tu.DeleteAll(t)
 
 	client := tu.GetPachClient(t)
-	// Activate Pachyderm Enterprise (if it's not already active)
-	require.NoError(t, tu.ActivateEnterprise(t, client))
-
 	resp, err := client.Activate(client.Ctx(), &auth.ActivateRequest{
 		Subject: robot("deckard"),
 	})
@@ -1864,9 +1510,6 @@ func TestActivateMismatchedUsernames(t *testing.T) {
 	defer tu.DeleteAll(t)
 
 	client := tu.GetPachClient(t)
-	// Activate Pachyderm Enterprise (if it's not already active)
-	require.NoError(t, tu.ActivateEnterprise(t, client))
-
 	_, err := client.Activate(client.Ctx(), &auth.ActivateRequest{
 		Subject:     "alice",
 		GitHubToken: "bob",
@@ -2281,14 +1924,6 @@ func TestInitialRobotUserGetOTP(t *testing.T) {
 	tu.DeleteAll(t)
 
 	adminClient := tu.GetPachClient(t)
-
-	// Activate enterprise manually
-	_, err := adminClient.Enterprise.Activate(adminClient.Ctx(),
-		&enterprise.ActivateRequest{
-			ActivationCode: tu.GetTestEnterpriseCode(t),
-		})
-
-	require.NoError(t, err)
 
 	// Activate auth as a robot user, not `pach:root`
 	resp, err := adminClient.AuthAPIClient.Activate(context.Background(),

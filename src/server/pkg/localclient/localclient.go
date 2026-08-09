@@ -34,8 +34,9 @@
 //     TestNoOutputRepoDoesntCrashPPSMaster (they delete the pachd pod to
 //     restart it; local mode has no pod to delete).
 //   - k8s scheduling semantics: TestPipelineCrashing (GPU), TestCrashingToStandby.
-//   - auth/enterprise: TestSecretsUnauthenticated, TestLokiLogs (enterprise
-//     activation), and the spout auth subtests (auth disabled in local mode).
+//   - auth: TestSecretsUnauthenticated, TestLokiLogs (loki logging is not
+//     configured in local mode), and the spout auth subtests (auth disabled in
+//     local mode). Enterprise has been removed from the fork entirely.
 //   - environment: TestCronPipeline (upstream bug: cron file paths embed the
 //     machine timezone offset, which PFS path validation rejects),
 //     TestSystemResourceRequests (asserts pachd/etcd deployment pods, which

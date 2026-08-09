@@ -12,7 +12,6 @@ import (
 	jsonpatch "github.com/evanphx/json-patch"
 	client "github.com/pachyderm/pachyderm/src/client"
 	"github.com/pachyderm/pachyderm/src/client/auth"
-	"github.com/pachyderm/pachyderm/src/client/enterprise"
 	"github.com/pachyderm/pachyderm/src/client/pkg/config"
 	"github.com/pachyderm/pachyderm/src/client/pkg/errors"
 	"github.com/pachyderm/pachyderm/src/client/pkg/grpcutil"
@@ -320,13 +319,7 @@ func (a *apiServer) workerPodSpec(options *workerOptions, pipelineInfo *pps.Pipe
 	if a.workerUsesRoot {
 		securityContext = &v1.PodSecurityContext{RunAsUser: &zeroVal}
 	}
-	resp, err := a.env.GetPachClient(context.Background()).Enterprise.GetState(context.Background(), &enterprise.GetStateRequest{})
-	if err != nil {
-		return v1.PodSpec{}, err
-	}
-	if resp.State != enterprise.State_ACTIVE {
-		workerImage = assets.AddRegistry("", workerImage)
-	}
+	workerImage = assets.AddRegistry("", workerImage)
 	podSpec := v1.PodSpec{
 		InitContainers: []v1.Container{
 			{

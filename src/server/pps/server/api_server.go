@@ -21,7 +21,6 @@ import (
 	"github.com/itchyny/gojq"
 	"github.com/pachyderm/pachyderm/src/client"
 	"github.com/pachyderm/pachyderm/src/client/auth"
-	enterpriseclient "github.com/pachyderm/pachyderm/src/client/enterprise"
 	"github.com/pachyderm/pachyderm/src/client/limit"
 	"github.com/pachyderm/pachyderm/src/client/pfs"
 	"github.com/pachyderm/pachyderm/src/client/pkg/errors"
@@ -1457,15 +1456,7 @@ func (a *apiServer) GetLogs(request *pps.GetLogsRequest, apiGetLogsServer pps.AP
 		request.Since = types.DurationProto(DefaultLogsFrom)
 	}
 	if a.env.LokiLogging || request.UseLokiBackend {
-		resp, err := pachClient.Enterprise.GetState(context.Background(),
-			&enterpriseclient.GetStateRequest{})
-		if err != nil {
-			return errors.Wrapf(grpcutil.ScrubGRPC(err), "could not get enterprise status")
-		}
-		if resp.State == enterpriseclient.State_ACTIVE {
-			return a.getLogsLoki(request, apiGetLogsServer)
-		}
-		return errors.Errorf("enterprise must be enabled to use loki logging")
+		return a.getLogsLoki(request, apiGetLogsServer)
 	}
 	func() { a.Log(request, nil, nil, 0) }()
 	defer func(start time.Time) { a.Log(request, nil, retErr, time.Since(start)) }(time.Now())

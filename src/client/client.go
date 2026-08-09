@@ -28,7 +28,6 @@ import (
 	"github.com/pachyderm/pachyderm/src/client/admin"
 	"github.com/pachyderm/pachyderm/src/client/auth"
 	"github.com/pachyderm/pachyderm/src/client/debug"
-	"github.com/pachyderm/pachyderm/src/client/enterprise"
 	"github.com/pachyderm/pachyderm/src/client/health"
 	"github.com/pachyderm/pachyderm/src/client/limit"
 	"github.com/pachyderm/pachyderm/src/client/pfs"
@@ -90,7 +89,6 @@ type APIClient struct {
 	AdminAPIClient
 	TransactionAPIClient
 	DebugClient
-	Enterprise enterprise.APIClient // not embedded--method name conflicts with AuthAPIClient
 
 	// addr is a "host:port" string pointing at a pachd endpoint
 	addr string
@@ -706,7 +704,6 @@ func (c *APIClient) connect(timeout time.Duration, unaryInterceptors []grpc.Unar
 	c.PpsAPIClient = pps.NewAPIClient(clientConn)
 	c.ObjectAPIClient = pfs.NewObjectAPIClient(clientConn)
 	c.AuthAPIClient = auth.NewAPIClient(clientConn)
-	c.Enterprise = enterprise.NewAPIClient(clientConn)
 	c.VersionAPIClient = versionpb.NewAPIClient(clientConn)
 	c.AdminAPIClient = admin.NewAPIClient(clientConn)
 	c.TransactionAPIClient = transaction.NewAPIClient(clientConn)

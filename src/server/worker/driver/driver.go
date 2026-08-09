@@ -28,7 +28,6 @@ import (
 	gitPlumbing "gopkg.in/src-d/go-git.v4/plumbing"
 
 	"github.com/pachyderm/pachyderm/src/client"
-	"github.com/pachyderm/pachyderm/src/client/enterprise"
 	"github.com/pachyderm/pachyderm/src/client/pfs"
 	"github.com/pachyderm/pachyderm/src/client/pkg/errors"
 	"github.com/pachyderm/pachyderm/src/client/pkg/grpcutil"
@@ -169,7 +168,7 @@ type driver struct {
 	uid *uint32
 	gid *uint32
 
-	// We only export application statistics if enterprise is enabled
+	// Application statistics are always exported (no enterprise license required)
 	exportStats bool
 
 	// The root directory to use when setting the user code path. This is normally
@@ -191,8 +190,7 @@ type driver struct {
 
 // NewDriver constructs a Driver object using the given clients and pipeline
 // settings.  It makes blocking calls to determine the user/group to use with
-// the user code on the current worker node, as well as determining if
-// enterprise features are activated (for exporting stats).
+// the user code on the current worker node.
 func NewDriver(
 	pipelineInfo *pps.PipelineInfo,
 	pachClient *client.APIClient,
@@ -271,11 +269,7 @@ func NewDriver(
 		}
 	}
 
-	if resp, err := pachClient.Enterprise.GetState(context.Background(), &enterprise.GetStateRequest{}); err != nil {
-		logs.NewStatlessLogger(pipelineInfo).Logf("failed to get enterprise state with error: %v\n", err)
-	} else {
-		result.exportStats = resp.State == enterprise.State_ACTIVE
-	}
+	result.exportStats = true
 
 	return result, nil
 }

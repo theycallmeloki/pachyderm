@@ -6,7 +6,6 @@ import (
 	pfs1_11 "github.com/pachyderm/pachyderm/src/client/admin/v1_11/pfs"
 	pps1_11 "github.com/pachyderm/pachyderm/src/client/admin/v1_11/pps"
 	"github.com/pachyderm/pachyderm/src/client/auth"
-	"github.com/pachyderm/pachyderm/src/client/enterprise"
 	"github.com/pachyderm/pachyderm/src/client/pfs"
 	"github.com/pachyderm/pachyderm/src/client/pkg/errors"
 	"github.com/pachyderm/pachyderm/src/client/pps"
@@ -559,12 +558,6 @@ func convert1_11Op(op *admin.Op1_11) (*admin.Op1_12, error) {
 						Source:  auth.TokenInfo_TokenSource(op.RestoreAuthToken.Token.TokenInfo.Source),
 					},
 				},
-			},
-		}, nil
-	case op.ActivateEnterprise != nil:
-		return &admin.Op1_12{
-			ActivateEnterprise: &enterprise.ActivateRequest{
-				ActivationCode: op.ActivateEnterprise.ActivationCode,
 			},
 		}, nil
 	case op.CheckAuthToken != nil:

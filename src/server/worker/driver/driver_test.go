@@ -19,7 +19,6 @@ import (
 	"gopkg.in/go-playground/webhooks.v5/github"
 
 	"github.com/pachyderm/pachyderm/src/client"
-	"github.com/pachyderm/pachyderm/src/client/enterprise"
 	"github.com/pachyderm/pachyderm/src/client/pfs"
 	"github.com/pachyderm/pachyderm/src/client/pkg/errors"
 	"github.com/pachyderm/pachyderm/src/client/pkg/require"
@@ -59,11 +58,6 @@ type testEnv struct {
 func withTestEnv(cb func(*testEnv)) error {
 	return testpachd.WithMockEnv(func(mockEnv *testpachd.MockEnv) (err error) {
 		env := &testEnv{MockEnv: *mockEnv}
-
-		// Mock out the enterprise.GetState call that happens during driver construction
-		env.MockPachd.Enterprise.GetState.Use(func(context.Context, *enterprise.GetStateRequest) (*enterprise.GetStateResponse, error) {
-			return &enterprise.GetStateResponse{State: enterprise.State_NONE}, nil
-		})
 
 		var d Driver
 		d, err = NewDriver(

@@ -6,7 +6,6 @@ import (
 	"github.com/pachyderm/pachyderm/src/client/admin"
 	"github.com/pachyderm/pachyderm/src/client/auth"
 	"github.com/pachyderm/pachyderm/src/client/debug"
-	"github.com/pachyderm/pachyderm/src/client/enterprise"
 	"github.com/pachyderm/pachyderm/src/client/pfs"
 	"github.com/pachyderm/pachyderm/src/client/pkg/grpcutil"
 	"github.com/pachyderm/pachyderm/src/client/pps"
@@ -220,10 +219,6 @@ type debugBuilderClient struct {
 	tb *TransactionBuilder
 }
 
-type enterpriseBuilderClient struct {
-	tb *TransactionBuilder
-}
-
 func newPfsBuilderClient(tb *TransactionBuilder) pfs.APIClient {
 	return &pfsBuilderClient{tb: tb}
 }
@@ -238,10 +233,6 @@ func newObjectBuilderClient(tb *TransactionBuilder) pfs.ObjectAPIClient {
 
 func newAuthBuilderClient(tb *TransactionBuilder) auth.APIClient {
 	return &authBuilderClient{tb: tb}
-}
-
-func newEnterpriseBuilderClient(tb *TransactionBuilder) enterprise.APIClient {
-	return &enterpriseBuilderClient{tb: tb}
 }
 
 func newVersionBuilderClient(tb *TransactionBuilder) versionpb.APIClient {
@@ -266,7 +257,6 @@ func newTransactionBuilder(parent *APIClient) *TransactionBuilder {
 	tb.PpsAPIClient = newPpsBuilderClient(tb)
 	tb.ObjectAPIClient = newObjectBuilderClient(tb)
 	tb.AuthAPIClient = newAuthBuilderClient(tb)
-	tb.Enterprise = newEnterpriseBuilderClient(tb)
 	tb.VersionAPIClient = newVersionBuilderClient(tb)
 	tb.AdminAPIClient = newAdminBuilderClient(tb)
 	tb.TransactionAPIClient = newTransactionBuilderClient(tb)
@@ -658,19 +648,6 @@ func (c *authBuilderClient) ExtractAuthTokens(ctx context.Context, req *auth.Ext
 }
 func (c *authBuilderClient) RestoreAuthToken(ctx context.Context, req *auth.RestoreAuthTokenRequest, opts ...grpc.CallOption) (*auth.RestoreAuthTokenResponse, error) {
 	return nil, unsupportedError("RestoreAuthToken")
-}
-
-func (c *enterpriseBuilderClient) Activate(ctx context.Context, req *enterprise.ActivateRequest, opts ...grpc.CallOption) (*enterprise.ActivateResponse, error) {
-	return nil, unsupportedError("Activate")
-}
-func (c *enterpriseBuilderClient) GetState(ctx context.Context, req *enterprise.GetStateRequest, opts ...grpc.CallOption) (*enterprise.GetStateResponse, error) {
-	return nil, unsupportedError("GetState")
-}
-func (c *enterpriseBuilderClient) GetActivationCode(ctx context.Context, req *enterprise.GetActivationCodeRequest, opts ...grpc.CallOption) (*enterprise.GetActivationCodeResponse, error) {
-	return nil, unsupportedError("GetActivationCode")
-}
-func (c *enterpriseBuilderClient) Deactivate(ctx context.Context, req *enterprise.DeactivateRequest, opts ...grpc.CallOption) (*enterprise.DeactivateResponse, error) {
-	return nil, unsupportedError("Deactivate")
 }
 
 func (c *versionBuilderClient) GetVersion(ctx context.Context, req *types.Empty, opts ...grpc.CallOption) (*versionpb.Version, error) {

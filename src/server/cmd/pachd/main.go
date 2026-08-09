@@ -18,7 +18,6 @@ import (
 	adminclient "github.com/pachyderm/pachyderm/src/client/admin"
 	authclient "github.com/pachyderm/pachyderm/src/client/auth"
 	debugclient "github.com/pachyderm/pachyderm/src/client/debug"
-	eprsclient "github.com/pachyderm/pachyderm/src/client/enterprise"
 	healthclient "github.com/pachyderm/pachyderm/src/client/health"
 	pfsclient "github.com/pachyderm/pachyderm/src/client/pfs"
 	"github.com/pachyderm/pachyderm/src/client/pkg/discovery"
@@ -33,7 +32,6 @@ import (
 	adminserver "github.com/pachyderm/pachyderm/src/server/admin/server"
 	authserver "github.com/pachyderm/pachyderm/src/server/auth/server"
 	debugserver "github.com/pachyderm/pachyderm/src/server/debug/server"
-	eprsserver "github.com/pachyderm/pachyderm/src/server/enterprise/server"
 	"github.com/pachyderm/pachyderm/src/server/health"
 	pach_http "github.com/pachyderm/pachyderm/src/server/http"
 	"github.com/pachyderm/pachyderm/src/server/pfs/s3"
@@ -355,17 +353,6 @@ func doSidecarMode(config interface{}) (retErr error) {
 	}); err != nil {
 		return err
 	}
-	if err := logGRPCServerSetup("Enterprise API", func() error {
-		enterpriseAPIServer, err := eprsserver.NewEnterpriseServer(
-			env, path.Join(env.EtcdPrefix, env.EnterpriseEtcdPrefix))
-		if err != nil {
-			return err
-		}
-		eprsclient.RegisterAPIServer(server.Server, enterpriseAPIServer)
-		return nil
-	}); err != nil {
-		return err
-	}
 	if err := logGRPCServerSetup("Health", func() error {
 		healthclient.RegisterHealthServer(server.Server, health.NewHealthServer())
 		return nil
@@ -634,17 +621,6 @@ func runFullMode(env *serviceenv.ServiceEnv, rt *localclient.Runtime) (retErr er
 		}); err != nil {
 			return err
 		}
-		if err := logGRPCServerSetup("Enterprise API", func() error {
-			enterpriseAPIServer, err := eprsserver.NewEnterpriseServer(
-				env, path.Join(env.EtcdPrefix, env.EnterpriseEtcdPrefix))
-			if err != nil {
-				return err
-			}
-			eprsclient.RegisterAPIServer(externalServer.Server, enterpriseAPIServer)
-			return nil
-		}); err != nil {
-			return err
-		}
 		if err := logGRPCServerSetup("Admin API", func() error {
 			adminclient.RegisterAPIServer(externalServer.Server, adminserver.NewAPIServer(address, env.StorageRoot, &adminclient.ClusterInfo{
 				ID:           clusterID,
@@ -805,17 +781,6 @@ func runFullMode(env *serviceenv.ServiceEnv, rt *localclient.Runtime) (retErr er
 				return err
 			}
 			transactionclient.RegisterAPIServer(internalServer.Server, transactionAPIServer)
-			return nil
-		}); err != nil {
-			return err
-		}
-		if err := logGRPCServerSetup("Enterprise API", func() error {
-			enterpriseAPIServer, err := eprsserver.NewEnterpriseServer(
-				env, path.Join(env.EtcdPrefix, env.EnterpriseEtcdPrefix))
-			if err != nil {
-				return err
-			}
-			eprsclient.RegisterAPIServer(internalServer.Server, enterpriseAPIServer)
 			return nil
 		}); err != nil {
 			return err

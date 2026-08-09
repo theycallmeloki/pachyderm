@@ -217,9 +217,6 @@ func getPachClientP(tb testing.TB, subject string, checkConfig bool) *client.API
 		initSeedClient(tb)
 	}
 
-	// Activate Pachyderm Enterprise (if it's not already active)
-	require.NoError(tb, ActivateEnterprise(tb, seedClient))
-
 	// Cluster may be in one of four states:
 	// 1) Auth is off (=> Activate auth)
 	// 2) Auth is on, but client tokens have been invalidated (=> Deactivate +

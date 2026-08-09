@@ -11,10 +11,8 @@ import (
 	"time"
 
 	"github.com/pachyderm/pachyderm/src/client/auth"
-	enterpriseclient "github.com/pachyderm/pachyderm/src/client/enterprise"
 	"github.com/pachyderm/pachyderm/src/client/pfs"
 	"github.com/pachyderm/pachyderm/src/client/pkg/errors"
-	"github.com/pachyderm/pachyderm/src/client/pkg/grpcutil"
 	"github.com/pachyderm/pachyderm/src/client/pps"
 	"github.com/pachyderm/pachyderm/src/client/version"
 	"github.com/pachyderm/pachyderm/src/server/pkg/backoff"
@@ -477,16 +475,6 @@ func (a *apiServer) watchAdmins(superAdminPrefix, fsAdminPrefix string) {
 	})
 }
 
-func (a *apiServer) getEnterpriseTokenState() (enterpriseclient.State, error) {
-	pachClient := a.env.GetPachClient(context.Background())
-	resp, err := pachClient.Enterprise.GetState(context.Background(),
-		&enterpriseclient.GetStateRequest{})
-	if err != nil {
-		return 0, errors.Wrapf(grpcutil.ScrubGRPC(err), "could not get Enterprise status")
-	}
-	return resp.State, nil
-}
-
 func (a *apiServer) githubEnabled() bool {
 	githubEnabled := false
 	config := a.getCacheConfig()
@@ -505,17 +493,6 @@ func (a *apiServer) Activate(ctx context.Context, req *auth.ActivateRequest) (re
 	// We don't want to actually log the request/response since they contain
 	// credentials.
 	defer func(start time.Time) { a.LogResp(nil, nil, retErr, time.Since(start)) }(time.Now())
-	// If the cluster's Pachyderm Enterprise token isn't active, the auth system
-	// cannot be activated
-	state, err := a.getEnterpriseTokenState()
-	if err != nil {
-		return nil, errors.Wrapf(err, "error confirming Pachyderm Enterprise token")
-	}
-	if state != enterpriseclient.State_ACTIVE {
-		return nil, errors.Errorf("Pachyderm Enterprise is not active in this " +
-			"cluster, and the Pachyderm auth API is an Enterprise-level feature")
-	}
-
 	// Activating an already activated auth service should fail, because
 	// otherwise anyone can just activate the service again and set
 	// themselves as an admin. If activation failed in PFS, calling auth.Activate
@@ -530,6 +507,7 @@ func (a *apiServer) Activate(ctx context.Context, req *auth.ActivateRequest) (re
 	// - 0 (no TTL, indefinite lifetime) if the initial admin is a robot user
 	//   (who has no way to acquire a new token once this token expires)
 	ttlSecs := int64(defaultSessionTTLSecs)
+	var err error
 	// Authenticate the caller (or generate a new auth token if req.Subject is a
 	// robot user)
 	if req.Subject != "" {
@@ -968,26 +946,6 @@ func (a *apiServer) applyClusterRoleBindings(ctx context.Context, roleBindings m
 	return nil
 }
 
-// expiredClusterAdminCheck enforces that if the cluster's enterprise token is
-// expired, only admins may log in.
-func (a *apiServer) expiredClusterAdminCheck(ctx context.Context, username string) error {
-	state, err := a.getEnterpriseTokenState()
-	if err != nil {
-		return errors.Wrapf(err, "error confirming Pachyderm Enterprise token")
-	}
-
-	isAdmin, err := a.hasClusterRole(ctx, username, auth.ClusterRole_SUPER)
-	if err != nil {
-		return err
-	}
-	if state != enterpriseclient.State_ACTIVE && !isAdmin {
-		return errors.New("Pachyderm Enterprise is not active in this " +
-			"cluster (until Pachyderm Enterprise is re-activated or Pachyderm " +
-			"auth is deactivated, only cluster admins can perform any operations)")
-	}
-	return nil
-}
-
 // Authenticate implements the protobuf auth.Authenticate RPC
 func (a *apiServer) Authenticate(ctx context.Context, req *auth.AuthenticateRequest) (resp *auth.AuthenticateResponse, retErr error) {
 	switch a.activationState() {
@@ -1015,12 +973,6 @@ func (a *apiServer) Authenticate(ctx context.Context, req *auth.AuthenticateRequ
 		// Determine caller's Pachyderm/GitHub username
 		username, err := GitHubTokenToUsername(ctx, req.GitHubToken)
 		if err != nil {
-			return nil, err
-		}
-
-		// If the cluster's enterprise token is expired, only admins may log in.
-		// Check if 'username' is an admin
-		if err := a.expiredClusterAdminCheck(ctx, username); err != nil {
 			return nil, err
 		}
 
@@ -1056,12 +1008,6 @@ func (a *apiServer) Authenticate(ctx context.Context, req *auth.AuthenticateRequ
 			return nil, err
 		}
 
-		// If the cluster's enterprise token is expired, only admins may log in.
-		// Check if 'username' is an admin
-		if err := a.expiredClusterAdminCheck(ctx, username); err != nil {
-			return nil, err
-		}
-
 		// Generate a new Pachyderm token and write it
 		pachToken = uuid.NewWithoutDashes()
 		if _, err := col.NewSTM(ctx, a.env.GetEtcdClient(), func(stm col.STM) error {
@@ -1089,12 +1035,6 @@ func (a *apiServer) Authenticate(ctx context.Context, req *auth.AuthenticateRequ
 				return err
 			}
 			otps.Delete(key)
-
-			// If the cluster's enterprise token is expired, only admins may log in
-			// Check if 'otpInfo.Subject' is an admin
-			if err := a.expiredClusterAdminCheck(ctx, otpInfo.Subject); err != nil {
-				return err
-			}
 
 			// Determine new token's TTL
 			ttl := int64(defaultSessionTTLSecs)
@@ -1140,12 +1080,6 @@ func (a *apiServer) Authenticate(ctx context.Context, req *auth.AuthenticateRequ
 
 		username, err := a.canonicalizeSubject(ctx, oidcSP.Prefix+":"+claims.Email)
 		if err != nil {
-			return nil, err
-		}
-
-		// If the cluster's enterprise token is expired, only admins may log in.
-		// Check if 'username' is an admin
-		if err := a.expiredClusterAdminCheck(ctx, username); err != nil {
 			return nil, err
 		}
 
@@ -1382,19 +1316,6 @@ func (a *apiServer) AuthorizeInTransaction(
 		}, nil
 	}
 
-	// If the cluster's enterprise token is expired, only admins and pipelines may
-	// authorize (and admins are already handled)
-	state, err := a.getEnterpriseTokenState()
-	if err != nil {
-		return nil, errors.Wrapf(err, "error confirming Pachyderm Enterprise token")
-	}
-	if state != enterpriseclient.State_ACTIVE &&
-		!strings.HasPrefix(callerInfo.Subject, auth.PipelinePrefix) {
-		return nil, errors.New("Pachyderm Enterprise is not active in this " +
-			"cluster (until Pachyderm Enterprise is re-activated or Pachyderm " +
-			"auth is deactivated, only cluster admins can perform any operations)")
-	}
-
 	// Get ACL to check
 	var acl auth.ACL
 	if err := a.acls.ReadWrite(txnCtx.Stm).Get(req.Repo, &acl); err != nil && !col.IsErrNotFound(err) {
@@ -1570,16 +1491,6 @@ func (a *apiServer) SetScopeInTransaction(
 			return true, nil
 		}
 
-		// Check if the cluster's enterprise token is expired (fail if so)
-		state, err := a.getEnterpriseTokenState()
-		if err != nil {
-			return false, errors.Wrapf(err, "error confirming Pachyderm Enterprise token")
-		}
-		if state != enterpriseclient.State_ACTIVE {
-			return false, errors.Errorf("Pachyderm Enterprise is not active in this " +
-				"cluster (only a cluster admin can set a scope)")
-		}
-
 		// Check if the user or one of their groups is on the ACL directly
 		scope, err := a.getScope(txnCtx.ClientContext, callerInfo.Subject, &acl)
 		if err != nil {
@@ -1683,19 +1594,6 @@ func (a *apiServer) GetScopeInTransaction(
 		return nil, err
 	}
 
-	// Check if the cluster's enterprise token is expired (fail if so)
-	// Note: this is duplicated from a.expiredClusterAdminCheck, but we need the
-	// admin information elsewhere, so the code is copied here
-	state, err := a.getEnterpriseTokenState()
-	if err != nil {
-		return nil, errors.Wrapf(err, "error confirming Pachyderm Enterprise token")
-	}
-	if state != enterpriseclient.State_ACTIVE && !callerIsAdmin {
-		return nil, errors.New("Pachyderm Enterprise is not active in this " +
-			"cluster (until Pachyderm Enterprise is re-activated or Pachyderm " +
-			"auth is deactivated, only cluster admins can perform any operations)")
-	}
-
 	// If the caller is getting another user's scopes, the caller must have
 	// READER access to every repo in the request--check this requirement
 	targetSubject := callerInfo.Subject
@@ -1782,18 +1680,9 @@ func (a *apiServer) GetACLInTransaction(
 		return nil, errors.Errorf("invalid request: must provide name of repo to get that repo's ACL")
 	}
 
-	// Get calling user
-	callerInfo, err := a.getAuthenticatedUser(txnCtx.ClientContext)
-	if err != nil {
-		return nil, err
-	}
-	if err := a.expiredClusterAdminCheck(txnCtx.ClientContext, callerInfo.Subject); err != nil {
-		return nil, err
-	}
-
 	// Read repo ACL from etcd
 	acl := &auth.ACL{}
-	if err = a.acls.ReadWrite(txnCtx.Stm).Get(req.Repo, acl); err != nil && !col.IsErrNotFound(err) {
+	if err := a.acls.ReadWrite(txnCtx.Stm).Get(req.Repo, acl); err != nil && !col.IsErrNotFound(err) {
 		return nil, err
 	}
 	response := &auth.GetACLResponse{
@@ -1888,16 +1777,6 @@ func (a *apiServer) SetACLInTransaction(
 		if isAdmin {
 			// admins are automatically authorized
 			return true, nil
-		}
-
-		// Check if the cluster's enterprise token is expired (fail if so)
-		state, err := a.getEnterpriseTokenState()
-		if err != nil {
-			return false, errors.Wrapf(err, "error confirming Pachyderm Enterprise token")
-		}
-		if state != enterpriseclient.State_ACTIVE {
-			return false, errors.Errorf("Pachyderm Enterprise is not active in this " +
-				"cluster (only a cluster admin can modify an ACL)")
 		}
 
 		// Check if there is an existing ACL, and if the user is on it

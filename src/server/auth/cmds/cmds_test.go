@@ -7,7 +7,6 @@ package cmds
 import (
 	"bytes"
 	"encoding/base64"
-	"fmt"
 	"io/ioutil"
 	"os"
 	"strings"
@@ -23,25 +22,10 @@ import (
 
 var activateMut sync.Mutex
 
-// activateEnterprise checks if Pachyderm Enterprise is active and if not,
-// activates it
-func activateEnterprise(t *testing.T) {
-	cmd := tu.Cmd("pachctl", "enterprise", "get-state")
-	out, err := cmd.Output()
-	require.NoError(t, err)
-	if !strings.Contains(string(out), "ACTIVE") {
-		// Enterprise not active in the cluster. Activate it.
-		cmd := tu.Cmd("pachctl", "enterprise", "activate")
-		cmd.Stdin = strings.NewReader(fmt.Sprintf("%s\n", tu.GetTestEnterpriseCode(t)))
-		require.NoError(t, cmd.Run())
-	}
-}
-
 func activateAuth(t *testing.T) {
 	t.Helper()
 	activateMut.Lock()
 	defer activateMut.Unlock()
-	activateEnterprise(t)
 	// TODO(msteffen): Make sure client & server have the same version
 	// Logout (to clear any expired tokens) and activate Pachyderm auth
 	require.NoError(t, tu.Cmd("pachctl", "auth", "logout").Run())
@@ -206,7 +190,6 @@ func TestActivateAsRobotUser(t *testing.T) {
 	defer deactivateAuth(t) // unwind "activate" command before deactivating
 	activateMut.Lock()
 	defer activateMut.Unlock()
-	activateEnterprise(t)
 	// Logout (to clear any expired tokens) and activate Pachyderm auth
 	require.NoError(t, tu.BashCmd(`
 	pachctl auth logout
@@ -228,7 +211,6 @@ func TestActivateMismatchedUsernames(t *testing.T) {
 	// actual call
 	activateMut.Lock()
 	defer activateMut.Unlock()
-	activateEnterprise(t)
 	// Logout (to clear any expired tokens) and activate Pachyderm auth
 	activate := tu.BashCmd(`
 		pachctl auth logout

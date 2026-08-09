@@ -12,7 +12,6 @@ import (
 	"github.com/pachyderm/pachyderm/src/client"
 	"github.com/pachyderm/pachyderm/src/client/admin"
 	"github.com/pachyderm/pachyderm/src/client/auth"
-	"github.com/pachyderm/pachyderm/src/client/enterprise"
 	"github.com/pachyderm/pachyderm/src/client/pfs"
 	"github.com/pachyderm/pachyderm/src/client/pkg/errors"
 	"github.com/pachyderm/pachyderm/src/client/pkg/grpcutil"
@@ -293,20 +292,6 @@ func (a *apiServer) Extract(request *admin.ExtractRequest, extractServer admin.A
 			}); err != nil {
 				return err
 			}
-		}
-	}
-	if !request.NoEnterprise {
-		state, err := pachClient.Enterprise.GetActivationCode(pachClient.Ctx(), &enterprise.GetActivationCodeRequest{})
-		if err != nil {
-			return err
-		}
-		// Don't write out expired or missing enterprise keys
-		if state.State == enterprise.State_ACTIVE {
-			if err := writeOp(&admin.Op{Op1_12: &admin.Op1_12{ActivateEnterprise: &enterprise.ActivateRequest{ActivationCode: state.ActivationCode}}}); err != nil {
-				return err
-			}
-		} else {
-			logrus.Warnf("Enterprise license state: %v, not extracting", state.State)
 		}
 	}
 
@@ -851,10 +836,6 @@ func (r *restoreCtx) applyOp(op *admin.Op1_12) error {
 	case op.RestoreAuthToken != nil:
 		if _, err := c.RestoreAuthToken(ctx, op.RestoreAuthToken); err != nil {
 			return errors.Wrapf(grpcutil.ScrubGRPC(err), "error restoring auth token")
-		}
-	case op.ActivateEnterprise != nil:
-		if _, err := c.Enterprise.Activate(ctx, op.ActivateEnterprise); err != nil {
-			return errors.Wrapf(grpcutil.ScrubGRPC(err), "error activating enterprise license")
 		}
 	case op.CheckAuthToken != nil:
 		// CheckAuthToken is inserted at the beginning of an extract that contains an ActivateAuth call

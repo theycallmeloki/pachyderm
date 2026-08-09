@@ -9,7 +9,6 @@ import (
 
 	"github.com/pachyderm/pachyderm/src/client/admin"
 	"github.com/pachyderm/pachyderm/src/client/auth"
-	"github.com/pachyderm/pachyderm/src/client/enterprise"
 	"github.com/pachyderm/pachyderm/src/client/pfs"
 	"github.com/pachyderm/pachyderm/src/client/pkg/errors"
 	"github.com/pachyderm/pachyderm/src/client/pkg/grpcutil"
@@ -371,60 +370,6 @@ func (api *authServerAPI) RestoreAuthToken(ctx context.Context, req *auth.Restor
 		return api.mock.RestoreAuthToken.handler(ctx, req)
 	}
 	return nil, errors.Errorf("unhandled pachd mock auth.RestoreAuthToken")
-}
-
-/* Enterprise Server Mocks */
-
-type activateEnterpriseFunc func(context.Context, *enterprise.ActivateRequest) (*enterprise.ActivateResponse, error)
-type getStateFunc func(context.Context, *enterprise.GetStateRequest) (*enterprise.GetStateResponse, error)
-type getActivationCodeFunc func(context.Context, *enterprise.GetActivationCodeRequest) (*enterprise.GetActivationCodeResponse, error)
-type deactivateEnterpriseFunc func(context.Context, *enterprise.DeactivateRequest) (*enterprise.DeactivateResponse, error)
-
-type mockActivateEnterprise struct{ handler activateEnterpriseFunc }
-type mockGetState struct{ handler getStateFunc }
-type mockGetActivationCode struct{ handler getActivationCodeFunc }
-type mockDeactivateEnterprise struct{ handler deactivateEnterpriseFunc }
-
-func (mock *mockActivateEnterprise) Use(cb activateEnterpriseFunc)     { mock.handler = cb }
-func (mock *mockGetState) Use(cb getStateFunc)                         { mock.handler = cb }
-func (mock *mockGetActivationCode) Use(cb getActivationCodeFunc)       { mock.handler = cb }
-func (mock *mockDeactivateEnterprise) Use(cb deactivateEnterpriseFunc) { mock.handler = cb }
-
-type enterpriseServerAPI struct {
-	mock *mockEnterpriseServer
-}
-
-type mockEnterpriseServer struct {
-	api               enterpriseServerAPI
-	Activate          mockActivateEnterprise
-	GetState          mockGetState
-	GetActivationCode mockGetActivationCode
-	Deactivate        mockDeactivateEnterprise
-}
-
-func (api *enterpriseServerAPI) Activate(ctx context.Context, req *enterprise.ActivateRequest) (*enterprise.ActivateResponse, error) {
-	if api.mock.Activate.handler != nil {
-		return api.mock.Activate.handler(ctx, req)
-	}
-	return nil, errors.Errorf("unhandled pachd mock enterprise.Activate")
-}
-func (api *enterpriseServerAPI) GetState(ctx context.Context, req *enterprise.GetStateRequest) (*enterprise.GetStateResponse, error) {
-	if api.mock.GetState.handler != nil {
-		return api.mock.GetState.handler(ctx, req)
-	}
-	return nil, errors.Errorf("unhandled pachd mock enterprise.GetState")
-}
-func (api *enterpriseServerAPI) GetActivationCode(ctx context.Context, req *enterprise.GetActivationCodeRequest) (*enterprise.GetActivationCodeResponse, error) {
-	if api.mock.GetActivationCode.handler != nil {
-		return api.mock.GetActivationCode.handler(ctx, req)
-	}
-	return nil, errors.Errorf("unhandled pachd mock enterprise.GetActivationCode")
-}
-func (api *enterpriseServerAPI) Deactivate(ctx context.Context, req *enterprise.DeactivateRequest) (*enterprise.DeactivateResponse, error) {
-	if api.mock.Deactivate.handler != nil {
-		return api.mock.Deactivate.handler(ctx, req)
-	}
-	return nil, errors.Errorf("unhandled pachd mock enterprise.Deactivate")
 }
 
 /* PFS Server Mocks */
@@ -1462,8 +1407,7 @@ type MockPachd struct {
 	PPS         mockPPSServer
 	Auth        mockAuthServer
 	Transaction mockTransactionServer
-	Enterprise  mockEnterpriseServer
-	Version     mockVersionServer
+	Version    mockVersionServer
 	Admin       mockAdminServer
 }
 
@@ -1482,7 +1426,6 @@ func NewMockPachd(ctx context.Context) (*MockPachd, error) {
 	mock.PPS.api.mock = &mock.PPS
 	mock.Auth.api.mock = &mock.Auth
 	mock.Transaction.api.mock = &mock.Transaction
-	mock.Enterprise.api.mock = &mock.Enterprise
 	mock.Version.api.mock = &mock.Version
 	mock.Admin.api.mock = &mock.Admin
 
@@ -1493,7 +1436,6 @@ func NewMockPachd(ctx context.Context) (*MockPachd, error) {
 
 	admin.RegisterAPIServer(server.Server, &mock.Admin.api)
 	auth.RegisterAPIServer(server.Server, &mock.Auth.api)
-	enterprise.RegisterAPIServer(server.Server, &mock.Enterprise.api)
 	pfs.RegisterObjectAPIServer(server.Server, &mock.Object.api)
 	pfs.RegisterAPIServer(server.Server, &mock.PFS.api)
 	pps.RegisterAPIServer(server.Server, &mock.PPS.api)

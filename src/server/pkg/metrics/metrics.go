@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/pachyderm/pachyderm/src/client"
-	"github.com/pachyderm/pachyderm/src/client/enterprise"
 	"github.com/pachyderm/pachyderm/src/client/pkg/config"
 	"github.com/pachyderm/pachyderm/src/client/pkg/errors"
 	"github.com/pachyderm/pachyderm/src/client/pps"
@@ -242,12 +241,6 @@ func inputMetrics(input *pps.Input, metrics *Metrics) {
 func internalMetrics(pachClient *client.APIClient, metrics *Metrics) {
 
 	// We should not return due to an error
-
-	// Activation code
-	enterpriseState, err := pachClient.Enterprise.GetState(pachClient.Ctx(), &enterprise.GetStateRequest{})
-	if err == nil {
-		metrics.ActivationCode = enterpriseState.ActivationCode
-	}
 
 	// Pipeline info
 	resp, err := pachClient.PpsAPIClient.ListPipeline(pachClient.Ctx(), &pps.ListPipelineRequest{AllowIncomplete: true})

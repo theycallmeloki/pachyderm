@@ -12,7 +12,6 @@ import (
 	pfs3 "github.com/pachyderm/pachyderm/src/client/admin/v1_10/pfs"
 	pps3 "github.com/pachyderm/pachyderm/src/client/admin/v1_10/pps"
 	auth "github.com/pachyderm/pachyderm/src/client/admin/v1_11/auth"
-	enterprise "github.com/pachyderm/pachyderm/src/client/admin/v1_11/enterprise"
 	pfs4 "github.com/pachyderm/pachyderm/src/client/admin/v1_11/pfs"
 	pps4 "github.com/pachyderm/pachyderm/src/client/admin/v1_11/pps"
 	pfs "github.com/pachyderm/pachyderm/src/client/admin/v1_7/pfs"
@@ -22,7 +21,6 @@ import (
 	pfs2 "github.com/pachyderm/pachyderm/src/client/admin/v1_9/pfs"
 	pps2 "github.com/pachyderm/pachyderm/src/client/admin/v1_9/pps"
 	auth1 "github.com/pachyderm/pachyderm/src/client/auth"
-	enterprise1 "github.com/pachyderm/pachyderm/src/client/enterprise"
 	pfs5 "github.com/pachyderm/pachyderm/src/client/pfs"
 	pps5 "github.com/pachyderm/pachyderm/src/client/pps"
 	grpc "google.golang.org/grpc"
@@ -497,7 +495,6 @@ type Op1_11 struct {
 	SetAuthConfig         *auth.SetConfigurationRequest         `protobuf:"bytes,13,opt,name=set_auth_config,json=setAuthConfig,proto3" json:"set_auth_config,omitempty"`
 	ActivateAuth          *auth.ActivateRequest                 `protobuf:"bytes,14,opt,name=activate_auth,json=activateAuth,proto3" json:"activate_auth,omitempty"`
 	RestoreAuthToken      *auth.RestoreAuthTokenRequest         `protobuf:"bytes,15,opt,name=restore_auth_token,json=restoreAuthToken,proto3" json:"restore_auth_token,omitempty"`
-	ActivateEnterprise    *enterprise.ActivateRequest           `protobuf:"bytes,16,opt,name=activate_enterprise,json=activateEnterprise,proto3" json:"activate_enterprise,omitempty"`
 	CheckAuthToken        *CheckAuthToken                       `protobuf:"bytes,17,opt,name=check_auth_token,json=checkAuthToken,proto3" json:"check_auth_token,omitempty"`
 	XXX_NoUnkeyedLiteral  struct{}                              `json:"-"`
 	XXX_unrecognized      []byte                                `json:"-"`
@@ -635,13 +632,6 @@ func (m *Op1_11) GetRestoreAuthToken() *auth.RestoreAuthTokenRequest {
 	return nil
 }
 
-func (m *Op1_11) GetActivateEnterprise() *enterprise.ActivateRequest {
-	if m != nil {
-		return m.ActivateEnterprise
-	}
-	return nil
-}
-
 func (m *Op1_11) GetCheckAuthToken() *CheckAuthToken {
 	if m != nil {
 		return m.CheckAuthToken
@@ -664,7 +654,6 @@ type Op1_12 struct {
 	SetAuthConfig         *auth1.SetConfigurationRequest         `protobuf:"bytes,13,opt,name=set_auth_config,json=setAuthConfig,proto3" json:"set_auth_config,omitempty"`
 	ActivateAuth          *auth1.ActivateRequest                 `protobuf:"bytes,14,opt,name=activate_auth,json=activateAuth,proto3" json:"activate_auth,omitempty"`
 	RestoreAuthToken      *auth1.RestoreAuthTokenRequest         `protobuf:"bytes,15,opt,name=restore_auth_token,json=restoreAuthToken,proto3" json:"restore_auth_token,omitempty"`
-	ActivateEnterprise    *enterprise1.ActivateRequest           `protobuf:"bytes,16,opt,name=activate_enterprise,json=activateEnterprise,proto3" json:"activate_enterprise,omitempty"`
 	CheckAuthToken        *CheckAuthToken                        `protobuf:"bytes,17,opt,name=check_auth_token,json=checkAuthToken,proto3" json:"check_auth_token,omitempty"`
 	XXX_NoUnkeyedLiteral  struct{}                               `json:"-"`
 	XXX_unrecognized      []byte                                 `json:"-"`
@@ -798,13 +787,6 @@ func (m *Op1_12) GetActivateAuth() *auth1.ActivateRequest {
 func (m *Op1_12) GetRestoreAuthToken() *auth1.RestoreAuthTokenRequest {
 	if m != nil {
 		return m.RestoreAuthToken
-	}
-	return nil
-}
-
-func (m *Op1_12) GetActivateEnterprise() *enterprise1.ActivateRequest {
-	if m != nil {
-		return m.ActivateEnterprise
 	}
 	return nil
 }
@@ -2050,21 +2032,7 @@ func (m *Op1_11) MarshalToSizedBuffer(dAtA []byte) (int, error) {
 		i--
 		dAtA[i] = 0x8a
 	}
-	if m.ActivateEnterprise != nil {
-		{
-			size, err := m.ActivateEnterprise.MarshalToSizedBuffer(dAtA[:i])
-			if err != nil {
-				return 0, err
-			}
-			i -= size
-			i = encodeVarintAdmin(dAtA, i, uint64(size))
-		}
-		i--
-		dAtA[i] = 0x1
-		i--
-		dAtA[i] = 0x82
-	}
-	if m.RestoreAuthToken != nil {
+		if m.RestoreAuthToken != nil {
 		{
 			size, err := m.RestoreAuthToken.MarshalToSizedBuffer(dAtA[:i])
 			if err != nil {
@@ -2273,21 +2241,7 @@ func (m *Op1_12) MarshalToSizedBuffer(dAtA []byte) (int, error) {
 		i--
 		dAtA[i] = 0x8a
 	}
-	if m.ActivateEnterprise != nil {
-		{
-			size, err := m.ActivateEnterprise.MarshalToSizedBuffer(dAtA[:i])
-			if err != nil {
-				return 0, err
-			}
-			i -= size
-			i = encodeVarintAdmin(dAtA, i, uint64(size))
-		}
-		i--
-		dAtA[i] = 0x1
-		i--
-		dAtA[i] = 0x82
-	}
-	if m.RestoreAuthToken != nil {
+		if m.RestoreAuthToken != nil {
 		{
 			size, err := m.RestoreAuthToken.MarshalToSizedBuffer(dAtA[:i])
 			if err != nil {
@@ -3020,11 +2974,7 @@ func (m *Op1_11) Size() (n int) {
 		l = m.RestoreAuthToken.Size()
 		n += 1 + l + sovAdmin(uint64(l))
 	}
-	if m.ActivateEnterprise != nil {
-		l = m.ActivateEnterprise.Size()
-		n += 2 + l + sovAdmin(uint64(l))
-	}
-	if m.CheckAuthToken != nil {
+		if m.CheckAuthToken != nil {
 		l = m.CheckAuthToken.Size()
 		n += 2 + l + sovAdmin(uint64(l))
 	}
@@ -3096,11 +3046,7 @@ func (m *Op1_12) Size() (n int) {
 		l = m.RestoreAuthToken.Size()
 		n += 1 + l + sovAdmin(uint64(l))
 	}
-	if m.ActivateEnterprise != nil {
-		l = m.ActivateEnterprise.Size()
-		n += 2 + l + sovAdmin(uint64(l))
-	}
-	if m.CheckAuthToken != nil {
+		if m.CheckAuthToken != nil {
 		l = m.CheckAuthToken.Size()
 		n += 2 + l + sovAdmin(uint64(l))
 	}
@@ -5107,42 +5053,6 @@ func (m *Op1_11) Unmarshal(dAtA []byte) error {
 				return err
 			}
 			iNdEx = postIndex
-		case 16:
-			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field ActivateEnterprise", wireType)
-			}
-			var msglen int
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowAdmin
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				msglen |= int(b&0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			if msglen < 0 {
-				return ErrInvalidLengthAdmin
-			}
-			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthAdmin
-			}
-			if postIndex > l {
-				return io.ErrUnexpectedEOF
-			}
-			if m.ActivateEnterprise == nil {
-				m.ActivateEnterprise = &enterprise.ActivateRequest{}
-			}
-			if err := m.ActivateEnterprise.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
-				return err
-			}
-			iNdEx = postIndex
 		case 17:
 			if wireType != 2 {
 				return fmt.Errorf("proto: wrong wireType = %d for field CheckAuthToken", wireType)
@@ -5731,42 +5641,6 @@ func (m *Op1_12) Unmarshal(dAtA []byte) error {
 				m.RestoreAuthToken = &auth1.RestoreAuthTokenRequest{}
 			}
 			if err := m.RestoreAuthToken.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
-				return err
-			}
-			iNdEx = postIndex
-		case 16:
-			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field ActivateEnterprise", wireType)
-			}
-			var msglen int
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowAdmin
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				msglen |= int(b&0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			if msglen < 0 {
-				return ErrInvalidLengthAdmin
-			}
-			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthAdmin
-			}
-			if postIndex > l {
-				return io.ErrUnexpectedEOF
-			}
-			if m.ActivateEnterprise == nil {
-				m.ActivateEnterprise = &enterprise1.ActivateRequest{}
-			}
-			if err := m.ActivateEnterprise.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex

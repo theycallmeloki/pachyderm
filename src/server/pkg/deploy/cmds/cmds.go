@@ -20,7 +20,6 @@ import (
 
 	"github.com/pachyderm/pachyderm/src/client"
 	"github.com/pachyderm/pachyderm/src/client/auth"
-	"github.com/pachyderm/pachyderm/src/client/enterprise"
 	"github.com/pachyderm/pachyderm/src/client/pkg/config"
 	"github.com/pachyderm/pachyderm/src/client/pkg/errors"
 	"github.com/pachyderm/pachyderm/src/client/pkg/grpcutil"
@@ -1044,15 +1043,6 @@ func Cmds() []*cobra.Command {
 				return errors.Wrapf(err, "error constructing pachyderm client")
 			}
 			defer c.Close()
-
-			enterpriseResp, err := c.Enterprise.GetState(c.Ctx(), &enterprise.GetStateRequest{})
-			if err != nil {
-				return errors.Wrapf(grpcutil.ScrubGRPC(err), "could not get Enterprise status")
-			}
-
-			if enterpriseResp.State != enterprise.State_ACTIVE {
-				return errors.New("Pachyderm Enterprise must be enabled to use this feature")
-			}
 
 			authActive, err := c.IsAuthActive()
 			if err != nil {
