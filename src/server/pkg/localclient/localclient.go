@@ -786,6 +786,12 @@ func (rt *Runtime) workerCmd(g *rcState, name, ip string, env []string) (*exec.C
 		"run", "--rm",
 		"--name", name,
 		"--network", "host",
+		// Map the k8s pachd service DNS name to loopback so user code that
+		// talks to pachd by its in-cluster hostname (e.g. the reprocess-spec
+		// test, which wgets pachd over HTTP) works in local mode. The worker
+		// shares the host network, and docker resolves the name via a
+		// container-scoped /etc/hosts entry without touching the host's.
+		"--add-host", fmt.Sprintf("pachd.%s.svc.cluster.local:127.0.0.1", g.ns),
 		// Run as the image's default user (usually root): the worker
 		// resolves Transform.User against the container's /etc/passwd and
 		// drops to that user (chowning inputs) around user code, which
