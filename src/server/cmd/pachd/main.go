@@ -1,18 +1,18 @@
 package main
 
 import (
-	"os/signal"
-	"syscall"
 	gotls "crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"runtime/debug"
 	"runtime/pprof"
 	"strconv"
+	"syscall"
 
 	"github.com/pachyderm/pachyderm/src/client"
 	adminclient "github.com/pachyderm/pachyderm/src/client/admin"
@@ -428,16 +428,17 @@ func doLocalMode(config interface{}) (retErr error) {
 		}
 	}
 	rt, err := localclient.NewRuntime(localclient.Options{
-		WorkerBinary:  workerBinary,
-		PachctlBinary: pachctlBinary,
-		EtcdHost:      env.EtcdHost,
-		EtcdPort:      env.EtcdPort,
-		PachdPort:     env.Port,
-		WorkerPort:    env.PPSWorkerPort,
-		LocalDir:      os.Getenv("PACH_LOCAL_DIR"),
-		StorageRoot:   env.StorageRoot,
-		Runtime:       os.Getenv("PACH_WORKER_RUNTIME"),
-		DaemonPodName: env.PachdPodName,
+		WorkerBinary:   workerBinary,
+		PachctlBinary:  pachctlBinary,
+		EtcdHost:       env.EtcdHost,
+		EtcdPort:       env.EtcdPort,
+		PachdPort:      env.Port,
+		WorkerPort:     env.PPSWorkerPort,
+		LocalDir:       os.Getenv("PACH_LOCAL_DIR"),
+		StorageRoot:    env.StorageRoot,
+		Runtime:        os.Getenv("PACH_WORKER_RUNTIME"),
+		DaemonPodName:  env.PachdPodName,
+		DaemonHTTPPort: int(env.HTTPPort),
 	})
 	if err != nil {
 		return errors.Wrapf(err, "could not start local worker runtime")

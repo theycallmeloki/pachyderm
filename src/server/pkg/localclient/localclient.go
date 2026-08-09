@@ -73,8 +73,8 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	v1 "k8s.io/api/core/v1"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
+	v1 "k8s.io/api/core/v1"
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -126,6 +126,11 @@ type Options struct {
 	// PACHD_POD_NAME). The debug server and unqualified log queries look
 	// pods up under this name.
 	DaemonPodName string
+	// DaemonHTTPPort is the port the daemon's HTTP API listens on (local mode
+	// remaps it into the 306xx range). The runtime forwards the pachd service
+	// port 652 (the k8s in-cluster HTTP port) to it so that user code inside
+	// workers can reach pachd by its cluster DNS name.
+	DaemonHTTPPort int
 }
 
 // Clientset is a kubernetes.Interface whose CoreV1 resources are backed by a
@@ -160,6 +165,10 @@ type Runtime struct {
 	// forward that exposes its container port on the host's loopback
 	// interface (the local stand-in for the k8s NodePort service).
 	svcForwards map[string]*tcpForward
+
+	// svcProxyName is the docker container running the pachd HTTP service
+	// proxy (port 652 -> daemon HTTP), killed on Close.
+	svcProxyName string
 
 	logSrv *httptest.Server
 
@@ -233,6 +242,10 @@ func NewRuntime(opts Options) (*Runtime, error) {
 			return nil, errors.Wrapf(err, "could not create %q", dir)
 		}
 	}
+	// Reap leftovers from a previous daemon run BEFORE starting any new
+	// containers: the reap removes every pach-local=svc container, which
+	// would otherwise kill the service proxy started below.
+	rt.reapOrphanedWorkers()
 	// Seed a synthetic "pachd" pod so that unqualified log queries (GetLogs
 	// with no pipeline/job, i.e. `pachctl logs`) resolve to the daemon.
 	pachdLog := filepath.Join(opts.LocalDir, "logs", "pachd.jsonl")
@@ -259,6 +272,22 @@ func NewRuntime(opts Options) (*Runtime, error) {
 		group:   pachdRC,
 	}}
 	rt.rcs["default/pachd"] = pachdRC
+	// Seed the pachd Service (k8s HTTP port 652) and make it reachable:
+	// user code that dials pachd.default.svc.cluster.local:652 (resolved by
+	// the worker's --add-host entry to loopback) lands on the daemon's HTTP
+	// API. Binding 652 directly fails on hosts that block unprivileged
+	// binds below 1024 (why local mode remaps ports to the 306xx range), so
+	// a root container relays it to the remapped port.
+	if opts.DaemonHTTPPort != 0 && opts.DaemonHTTPPort != 652 {
+		rt.services["default/pachd"] = &v1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "pachd", Namespace: "default"},
+			Spec: v1.ServiceSpec{
+				ClusterIP: "127.0.0.1",
+				Ports:     []v1.ServicePort{{Name: "http", Port: 652}},
+			},
+		}
+		rt.startPachdServiceProxy()
+	}
 	// The debug server reads the daemon's own logs under its pod name
 	// (PACHD_POD_NAME); mirror it as a second pod sharing the same file.
 	if opts.DaemonPodName != "" && opts.DaemonPodName != "pachd" {
@@ -287,9 +316,83 @@ func NewRuntime(opts Options) (*Runtime, error) {
 		}}
 		rt.rcs["default/"+opts.DaemonPodName] = daemonRC
 	}
-	rt.reapOrphanedWorkers()
 	rt.logSrv = httptest.NewServer(http.HandlerFunc(rt.handleLogs))
 	return rt, nil
+}
+
+// pachdServiceProxyImage runs the pachd HTTP service proxy (k8s port 652 ->
+// the daemon's remapped HTTP port) as a root container, since unprivileged
+// binds below 1024 are blocked on many hosts. It must be present locally;
+// docker-mode workers already require local images.
+const pachdServiceProxyImage = "python:latest"
+
+// pachdServiceProxyScript is a minimal TCP relay; args: <listen> <target>.
+const pachdServiceProxyScript = `import socket, threading, sys
+srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(('0.0.0.0', int(sys.argv[1])))
+srv.listen(32)
+def relay(c):
+    try:
+        u = socket.create_connection(('127.0.0.1', int(sys.argv[2])), timeout=10)
+    except Exception:
+        c.close(); return
+    def pump(src, dst):
+        try:
+            while True:
+                d = src.recv(65536)
+                if not d: break
+                dst.sendall(d)
+        except Exception:
+            pass
+        finally:
+            try: dst.shutdown(socket.SHUT_WR)
+            except Exception: pass
+    threading.Thread(target=pump, args=(c, u), daemon=True).start()
+    threading.Thread(target=pump, args=(u, c), daemon=True).start()
+while True:
+    conn, _ = srv.accept()
+    threading.Thread(target=relay, args=(conn,), daemon=True).start()
+`
+
+// startPachdServiceProxy launches the pachd HTTP service proxy container
+// (only possible in docker mode: process-mode workers run unprivileged and
+// cannot bind port 652).
+func (rt *Runtime) startPachdServiceProxy() {
+	if rt.opts.Runtime != "docker" {
+		log.Warnf("localclient: pachd service DNS (port 652) cannot be proxied in process mode")
+		return
+	}
+	if out, err := exec.Command(rt.dockerBin, "image", "inspect", pachdServiceProxyImage).CombinedOutput(); err != nil {
+		log.Warnf("localclient: %s not available (%v); pachd service DNS (port 652) will not resolve: %s",
+			pachdServiceProxyImage, err, strings.TrimSpace(string(out)))
+		return
+	}
+	scriptDir := filepath.Join(rt.opts.LocalDir, "svc")
+	if err := os.MkdirAll(scriptDir, 0777); err != nil {
+		log.Warnf("localclient: could not create %q: %v", scriptDir, err)
+		return
+	}
+	// Unique per daemon: a stale file or directory left by a previous run
+	// (e.g. docker auto-creating the mount source as root) must not block
+	// this run's proxy.
+	scriptPath := filepath.Join(scriptDir, fmt.Sprintf("proxy-%d.py", os.Getpid()))
+	if err := ioutil.WriteFile(scriptPath, []byte(pachdServiceProxyScript), 0644); err != nil {
+		log.Warnf("localclient: could not write service proxy script: %v", err)
+		return
+	}
+	name := fmt.Sprintf("pachd-http-svc-%d", os.Getpid())
+	cmd := exec.Command(rt.dockerBin, "run", "-d", "--rm", "--network", "host",
+		"--name", name, "--label", "pach-local=svc",
+		"-v", scriptPath+":/proxy.py:ro",
+		pachdServiceProxyImage, "python", "/proxy.py",
+		strconv.Itoa(652), strconv.Itoa(rt.opts.DaemonHTTPPort))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		log.Warnf("localclient: could not start pachd service proxy: %v: %s", err, strings.TrimSpace(string(out)))
+		return
+	}
+	rt.svcProxyName = name
+	log.Infof("localclient: pachd HTTP service proxy listening on 652 (-> %d)", rt.opts.DaemonHTTPPort)
 }
 
 // reapOrphanedWorkers kills worker processes from a previous daemon run and
@@ -318,14 +421,16 @@ func (rt *Runtime) reapOrphanedWorkers() {
 	// docker CLI wrapper is dead, so the pid file cannot name them); remove
 	// every container we have ever labelled.
 	if rt.opts.Runtime == "docker" {
-		out, err := exec.Command(rt.dockerBin, "ps", "-aq", "--filter", "label=pach-local=worker").Output()
-		if err != nil {
-			log.Warnf("localclient: could not list orphaned worker containers: %v", err)
-			return
-		}
-		for _, id := range strings.Fields(string(out)) {
-			if err := exec.Command(rt.dockerBin, "rm", "-f", id).Run(); err != nil {
-				log.Warnf("localclient: could not remove orphaned container %s: %v", id, err)
+		for _, label := range []string{"pach-local=worker", "pach-local=svc"} {
+			out, err := exec.Command(rt.dockerBin, "ps", "-aq", "--filter", "label="+label).Output()
+			if err != nil {
+				log.Warnf("localclient: could not list orphaned containers: %v", err)
+				continue
+			}
+			for _, id := range strings.Fields(string(out)) {
+				if err := exec.Command(rt.dockerBin, "rm", "-f", id).Run(); err != nil {
+					log.Warnf("localclient: could not remove orphaned container %s: %v", id, err)
+				}
 			}
 		}
 	}
@@ -385,6 +490,12 @@ func NewClientset(rt *Runtime) *Clientset {
 
 // Close shuts down the runtime, killing all workers and the log server.
 func (rt *Runtime) Close() {
+	if rt.svcProxyName != "" {
+		if err := exec.Command(rt.dockerBin, "kill", rt.svcProxyName).Run(); err != nil {
+			log.Warnf("localclient: could not stop pachd service proxy %s: %v", rt.svcProxyName, err)
+		}
+		rt.svcProxyName = ""
+	}
 	rt.mu.Lock()
 	for key, f := range rt.svcForwards {
 		delete(rt.svcForwards, key)
@@ -1525,7 +1636,7 @@ func (n *nodes) List(opts metav1.ListOptions) (*v1.NodeList, error) {
 				Labels: map[string]string{"kubernetes.io/hostname": "local"},
 			},
 			Status: v1.NodeStatus{
-				Phase:  v1.NodeRunning,
+				Phase: v1.NodeRunning,
 				Addresses: []v1.NodeAddress{{
 					Type:    v1.NodeInternalIP,
 					Address: "127.0.0.1",
@@ -1835,4 +1946,3 @@ func (rt *Runtime) lookupSecretLocked(ns, name, key string) (string, bool) {
 	}
 	return string(val), true
 }
-
