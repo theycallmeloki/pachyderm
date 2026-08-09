@@ -5,6 +5,9 @@
 # For context helper script config
 .ctx
 
+# codebase-memory-mcp local index (regenerated; not versioned)
+.codebase-memory/
+
 # Build artifacts
 .goxc.json
 /protofix
