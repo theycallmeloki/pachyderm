@@ -125,8 +125,6 @@ type APIClient struct {
 	// The context used in requests, can be set with WithCtx
 	ctx context.Context
 
-	portForwarder *PortForwarder
-
 	storageV2 bool
 }
 
@@ -419,22 +417,6 @@ func getUserMachineAddrAndOpts(context *config.Context) (*grpcutil.PachdAddress,
 	return nil, options, nil
 }
 
-func portForwarder(context *config.Context) (*PortForwarder, uint16, error) {
-	fw, err := NewPortForwarder(context, "")
-	if err != nil {
-		return nil, 0, errors.Wrap(err, "failed to initialize port forwarder")
-	}
-
-	port, err := fw.RunForDaemon(0, 650)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	log.Debugf("Implicit port forwarder listening on port %d", port)
-
-	return fw, port, nil
-}
-
 // NewForTest constructs a new APIClient for tests.
 func NewForTest() (*APIClient, error) {
 	cfg, err := config.Read(false, false)
@@ -486,7 +468,6 @@ func NewOnUserMachine(prefix string, options ...Option) (*APIClient, error) {
 		return nil, err
 	}
 
-	var fw *PortForwarder
 	if pachdAddress == nil && context.PortForwarders != nil {
 		pachdLocalPort, ok := context.PortForwarders["pachd"]
 		if ok {
@@ -499,16 +480,10 @@ func NewOnUserMachine(prefix string, options ...Option) (*APIClient, error) {
 		}
 	}
 	if pachdAddress == nil {
-		var pachdLocalPort uint16
-		fw, pachdLocalPort, err = portForwarder(context)
-		if err != nil {
-			return nil, err
-		}
-		pachdAddress = &grpcutil.PachdAddress{
-			Secured: false,
-			Host:    "localhost",
-			Port:    pachdLocalPort,
-		}
+		// The k8s port-forward fallback that used to live here was removed
+		// with the Kubernetes tooling; local mode requires an explicit
+		// address (PACHD_ADDRESS or the context's pachd_address).
+		return nil, errors.New("could not determine the pachd address: set PACHD_ADDRESS or configure the context's pachd_address")
 	}
 
 	client, err := NewFromAddress(pachdAddress.Hostname(), append(options, cfgOptions...)...)
@@ -541,10 +516,8 @@ func NewOnUserMachine(prefix string, options ...Option) (*APIClient, error) {
 		}
 	}
 
-	// Add port forwarding. This will set it to nil if port forwarding is
-	// disabled, or an address is explicitly set.
-	client.portForwarder = fw
-
+	// Port forwarding was removed with the Kubernetes tooling; an explicit
+	// address is always required (see NewOnUserMachine).
 	return client, nil
 }
 
@@ -601,10 +574,6 @@ func NewInWorker(options ...Option) (*APIClient, error) {
 func (c *APIClient) Close() error {
 	if err := c.clientConn.Close(); err != nil {
 		return err
-	}
-
-	if c.portForwarder != nil {
-		c.portForwarder.Close()
 	}
 
 	return nil
