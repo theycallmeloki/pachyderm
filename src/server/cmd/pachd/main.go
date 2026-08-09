@@ -131,13 +131,22 @@ func runLocal() {
 		}
 		etcdPort = p
 	}
-	etcdEnv, err := localetcd.Start(filepath.Join(localDir, "etcd"), uint16(etcdPort))
+	// Default to loopback. Set PACH_LOCAL_ETCD_HOST to a LAN address (or
+	// 0.0.0.0) when broker agents on other nodes must reach the task queue;
+	// the daemon then advertises this host to its own etcd client and local
+	// workers too, and the broker agent rewrites it to the discovered pachd
+	// address for remote workers.
+	etcdHost := "127.0.0.1"
+	if h := os.Getenv("PACH_LOCAL_ETCD_HOST"); h != "" {
+		etcdHost = h
+	}
+	etcdEnv, err := localetcd.Start(filepath.Join(localDir, "etcd"), etcdHost, uint16(etcdPort))
 	if err != nil {
 		fmt.Printf("could not start embedded etcd: %v\n", err)
 		os.Exit(1)
 	}
 	defer etcdEnv.Close()
-	os.Setenv("ETCD_SERVICE_HOST", "127.0.0.1")
+	os.Setenv("ETCD_SERVICE_HOST", etcdHost)
 	os.Setenv("ETCD_SERVICE_PORT", strconv.Itoa(etcdPort))
 	// PACHD_POD_NAME is normally injected by k8s' Downward API; give the
 	// daemon a stable name in local mode.
@@ -431,12 +440,13 @@ func doLocalMode(config interface{}) (retErr error) {
 	}
 	// Broker: lets workers run on remote nodes (see src/server/pkg/broker).
 	// An agent on another machine registers here and receives spawn/kill
-	// commands; pipelines opt in with a PACH_NODE_TAG env var. Disabled by
-	// setting PACH_BROKER_ADDRESS to "off".
+	// commands; pipelines opt in with a PACH_NODE_TAG env var. It binds all
+	// interfaces (agents connect over the LAN; discovery advertises the
+	// port). Disabled by setting PACH_BROKER_ADDRESS to "off".
 	var bs *broker.Server
 	if addr := os.Getenv("PACH_BROKER_ADDRESS"); addr != "off" {
 		if addr == "" {
-			addr = "127.0.0.1:30660"
+			addr = "0.0.0.0:30660"
 		}
 		var err error
 		bs, err = broker.Listen(addr)
@@ -464,6 +474,17 @@ func doLocalMode(config interface{}) (retErr error) {
 	}
 	if bs != nil {
 		bs.SetExitHandler(rt.HandleRemoteWorkerExit)
+		// Advertise the daemon so agents can find it without configuration.
+		// The daemon's hostname plus the gRPC/etcd/broker ports go in the
+		// TXT record; the SRV address is whatever LAN interface answers.
+		etcdPort, _ := strconv.Atoi(env.EtcdPort)
+		_, brokerPort, _ := net.SplitHostPort(bs.Addr())
+		brokerPortInt, _ := strconv.Atoi(brokerPort)
+		if hostname, err := os.Hostname(); err == nil {
+			if _, err := broker.Publish(hostname, int(env.Port), etcdPort, brokerPortInt); err != nil {
+				log.Errorf("local mode: could not publish via mDNS: %v", err)
+			}
+		}
 	}
 	env.InstallLocalKube(localclient.NewClientset(rt))
 	// Kill worker processes when the daemon exits (normally or via signal), so

@@ -26,13 +26,15 @@ type Env struct {
 }
 
 // Start launches an embedded etcd server with its data directory under
-// 'dataDir', listening on 127.0.0.1:'port'. The etcd v2 HTTP API is enabled,
-// because pachd's sharder still uses it (see cmd/pachd/main.go). The returned
-// Env's EtcdClient is ready to use; call Close to shut everything down.
-func Start(dataDir string, port uint16) (*Env, error) {
+// 'dataDir', listening on 'host':'port' (host defaults to 127.0.0.1; set it
+// to a LAN address or 0.0.0.0 so broker agents on other nodes can reach the
+// task queue). The etcd v2 HTTP API is enabled, because pachd's sharder
+// still uses it (see cmd/pachd/main.go). The returned Env's EtcdClient is
+// ready to use; call Close to shut everything down.
+func Start(dataDir string, host string, port uint16) (*Env, error) {
 	// etcd's WAL segment size is a global setting; tests already rely on this
 	// pattern, and a smaller segment size keeps the local data dir compact.
-	clientURL, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
+	clientURL, err := url.Parse(fmt.Sprintf("http://%s:%d", host, port))
 	if err != nil {
 		return nil, errors.Wrapf(err, "could not parse etcd client URL")
 	}

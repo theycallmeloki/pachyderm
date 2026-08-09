@@ -14,10 +14,12 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -41,17 +43,25 @@ type options struct {
 	localDir     string
 	workerBinary string
 	pachdAddr    string
+	join         string
+	etcdPort     int
+	brokerPort   int
+	discover     bool
 	runtime      string
 	dockerBin    string
 }
 
 func parseOptions() (*options, error) {
 	opts := &options{}
-	flag.StringVar(&opts.brokerAddr, "broker", envOr("PACH_BROKER_ADDRESS", "127.0.0.1:30660"), "broker address (host:port)")
+	flag.StringVar(&opts.brokerAddr, "broker", os.Getenv("PACH_BROKER_ADDRESS"), "broker address (host:port); defaults to the discovered pachd's broker port")
 	tags := flag.String("tag", os.Getenv("PACH_AGENT_TAG"), "comma-separated node tags this agent serves")
 	flag.StringVar(&opts.localDir, "local-dir", envOr("PACH_AGENT_DIR", filepath.Join(os.TempDir(), "pach-agent")), "agent data dir (worker scratch, logs, pid file)")
 	flag.StringVar(&opts.workerBinary, "worker-binary", os.Getenv("PACH_WORKER_BINARY"), "path to the pachd worker binary")
 	flag.StringVar(&opts.pachdAddr, "pachd-address", os.Getenv("PACH_PEER_ADDRESS"), "pachd address (host:port) workers connect to; defaults to pachd's PEER_PORT (loopback)")
+	flag.StringVar(&opts.join, "join", os.Getenv("PACH_JOIN"), "join a specific pachd host (host or host:port); skips mDNS discovery")
+	flag.IntVar(&opts.etcdPort, "etcd-port", envInt("PACH_ETCD_PORT", 2379), "pachd's etcd port (used with --join/--pachd-address)")
+	flag.IntVar(&opts.brokerPort, "broker-port", envInt("PACH_BROKER_PORT", 30660), "pachd's broker port (used when --broker is not set)")
+	flag.BoolVar(&opts.discover, "discover", envBool("PACH_AGENT_DISCOVER", true), "discover pachd via mDNS when no address is given")
 	flag.StringVar(&opts.runtime, "runtime", envOr("PACH_WORKER_RUNTIME", "docker"), "how workers run: docker (default) or process")
 	flag.StringVar(&opts.dockerBin, "docker", envOr("PACH_DOCKER_BIN", "docker"), "path to the docker binary (docker runtime)")
 	flag.Parse()
@@ -79,6 +89,55 @@ func envOr(key, def string) string {
 	return def
 }
 
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+func envBool(key string, def bool) bool {
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
+		}
+	}
+	return def
+}
+
+// resolveTarget determines how to reach pachd: an explicit --pachd-address
+// wins, then --join (a host, pachd port defaulted), then mDNS discovery.
+func resolveTarget(opts *options) (*broker.Target, error) {
+	if opts.pachdAddr != "" {
+		host, portStr, err := net.SplitHostPort(opts.pachdAddr)
+		if err != nil {
+			return nil, errors.Wrapf(err, "invalid --pachd-address %q", opts.pachdAddr)
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			return nil, errors.Wrapf(err, "invalid --pachd-address %q", opts.pachdAddr)
+		}
+		return &broker.Target{IP: host, PachdPort: port, EtcdPort: opts.etcdPort, BrokerPort: opts.brokerPort}, nil
+	}
+	if opts.join != "" {
+		host := opts.join
+		port := 30650
+		if h, p, err := net.SplitHostPort(opts.join); err == nil {
+			host = h
+			if n, err := strconv.Atoi(p); err == nil {
+				port = n
+			}
+		}
+		return &broker.Target{IP: host, PachdPort: port, EtcdPort: opts.etcdPort, BrokerPort: opts.brokerPort}, nil
+	}
+	if opts.discover {
+		return broker.Resolve(5 * time.Second)
+	}
+	return nil, errors.New("no pachd address: set --pachd-address, --join, or enable discovery (--discover)")
+}
+
 // workerProc is one worker this agent is running.
 type workerProc struct {
 	id     string
@@ -95,6 +154,7 @@ type agent struct {
 	mu      sync.Mutex
 	workers map[string]*workerProc
 	client  *broker.Client
+	target  *broker.Target // pachd reachability, resolved per session
 }
 
 func newAgent(opts *options) *agent {
@@ -158,8 +218,15 @@ func (a *agent) spawn(s *broker.Spawn) error {
 	// container-correct values (PACH_WORKER_ROOT=/ and PACH_CACHE_ROOT=/pach-cache,
 	// matching the mounts below); in process mode the scratch dirs are ours.
 	env := s.Env
-	if a.opts.pachdAddr != "" {
-		env = setEnv(env, "PACH_PEER_ADDRESS", a.opts.pachdAddr)
+	a.mu.Lock()
+	target := a.target
+	a.mu.Unlock()
+	if target != nil {
+		// Point the worker at pachd over the LAN: pachd computed loopback
+		// addresses that only work on the daemon's own host.
+		env = setEnv(env, "ETCD_SERVICE_HOST", target.IP)
+		env = setEnv(env, "ETCD_SERVICE_PORT", strconv.Itoa(target.EtcdPort))
+		env = setEnv(env, "PACH_PEER_ADDRESS", target.PachdAddress())
 	}
 	runtime := s.Runtime
 	if runtime == "" {
@@ -309,15 +376,23 @@ func (a *agent) heartbeatLoop() {
 }
 
 // runSession handles one broker connection: heartbeats + command dispatch.
-func (a *agent) runSession() error {
+func (a *agent) runSession(brokerAddr string, target *broker.Target) error {
 	hostname, _ := os.Hostname()
-	client, err := broker.Connect(a.opts.brokerAddr, hostname, a.opts.tags)
+	client, err := broker.Connect(brokerAddr, hostname, a.opts.tags)
 	if err != nil {
 		return err
 	}
 	a.client = client
-	defer client.Close()
-	log.Infof("agent: registered with broker as %s (tags %v)", client.NodeID, a.opts.tags)
+	a.mu.Lock()
+	a.target = target
+	a.mu.Unlock()
+	defer func() {
+		client.Close()
+		a.mu.Lock()
+		a.target = nil
+		a.mu.Unlock()
+	}()
+	log.Infof("agent: registered with broker %s as %s (tags %v)", brokerAddr, client.NodeID, a.opts.tags)
 
 	go a.heartbeatLoop()
 	for {
@@ -372,7 +447,17 @@ func main() {
 
 	// Reconnect forever; a broker restart must not take the node down.
 	for {
-		if err := a.runSession(); err != nil {
+		target, err := resolveTarget(opts)
+		if err != nil {
+			log.Errorf("agent: %v; retrying in %s", err, reconnectDelay)
+			time.Sleep(reconnectDelay)
+			continue
+		}
+		brokerAddr := opts.brokerAddr
+		if brokerAddr == "" {
+			brokerAddr = target.BrokerAddress()
+		}
+		if err := a.runSession(brokerAddr, target); err != nil {
 			log.Errorf("agent: broker session ended: %v; reconnecting in %s", err, reconnectDelay)
 		}
 		// Kubelet semantics: if the broker connection is gone, pachd cannot
