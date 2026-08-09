@@ -153,8 +153,10 @@ type agent struct {
 	pidFile *podrunner.PidFile
 	mu      sync.Mutex
 	workers map[string]*workerProc
+	relays  map[string]*broker.Relay // "workerID/externalPort" -> relay
 	client  *broker.Client
 	target  *broker.Target // pachd reachability, resolved per session
+	localIP string         // address service relays bind (broker conn's local addr)
 }
 
 func newAgent(opts *options) *agent {
@@ -162,6 +164,7 @@ func newAgent(opts *options) *agent {
 		opts:    opts,
 		pidFile: podrunner.NewPidFile(opts.localDir),
 		workers: make(map[string]*workerProc),
+		relays:  make(map[string]*broker.Relay),
 	}
 }
 
@@ -291,6 +294,7 @@ func (a *agent) spawn(s *broker.Spawn) error {
 		w.exited = true
 		w.err = err
 		w.mu.Unlock()
+		a.closeWorkerRelays(s.WorkerID)
 		log.Infof("agent: worker %s exited: %v", s.WorkerID, err)
 	}()
 	return nil
@@ -364,6 +368,50 @@ func (a *agent) statuses() []broker.WorkerState {
 	return out
 }
 
+// handleForward exposes the worker's internal port on this node: the
+// daemon-side relay connects to nodeIP:ExternalPort, and we forward to the
+// worker's listener (host networking puts it on loopback).
+func (a *agent) handleForward(f *broker.Forward) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	key := fmt.Sprintf("%s/%d", f.WorkerID, f.ExternalPort)
+	if _, ok := a.relays[key]; ok {
+		return nil // already exposed
+	}
+	relay, err := broker.NewRelay(a.localIP, f.ExternalPort, net.JoinHostPort("127.0.0.1", strconv.Itoa(f.InternalPort)))
+	if err != nil {
+		return err
+	}
+	a.relays[key] = relay
+	log.Infof("agent: exposing worker %s service on %s:%d -> :%d", f.WorkerID, a.localIP, f.ExternalPort, f.InternalPort)
+	return nil
+}
+
+func (a *agent) handleUnforward(u *broker.Unforward) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	key := fmt.Sprintf("%s/%d", u.WorkerID, u.ExternalPort)
+	if relay, ok := a.relays[key]; ok {
+		relay.Close()
+		delete(a.relays, key)
+		log.Infof("agent: stopped exposing worker %s service on :%d", u.WorkerID, u.ExternalPort)
+	}
+	return nil
+}
+
+// closeWorkerRelays drops every relay a worker owned (it exited).
+func (a *agent) closeWorkerRelays(workerID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	prefix := workerID + "/"
+	for key, relay := range a.relays {
+		if strings.HasPrefix(key, prefix) {
+			relay.Close()
+			delete(a.relays, key)
+		}
+	}
+}
+
 // heartbeatLoop reports worker status every HeartbeatInterval.
 func (a *agent) heartbeatLoop() {
 	t := time.NewTicker(heartbeatInterval)
@@ -385,6 +433,7 @@ func (a *agent) runSession(brokerAddr string, target *broker.Target) error {
 	a.client = client
 	a.mu.Lock()
 	a.target = target
+	a.localIP = client.LocalIP()
 	a.mu.Unlock()
 	defer func() {
 		client.Close()
@@ -411,6 +460,19 @@ func (a *agent) runSession(brokerAddr string, target *broker.Target) error {
 			}
 		case *broker.Kill:
 			err := a.kill(m)
+			if ackErr := client.Ack(m.CmdID, m.WorkerID, err); ackErr != nil {
+				return ackErr
+			}
+		case *broker.Forward:
+			err := a.handleForward(m)
+			if ackErr := client.Ack(m.CmdID, m.WorkerID, err); ackErr != nil {
+				return ackErr
+			}
+			if err != nil {
+				log.Errorf("agent: forward %s failed: %v", m.WorkerID, err)
+			}
+		case *broker.Unforward:
+			err := a.handleUnforward(m)
 			if ackErr := client.Ack(m.CmdID, m.WorkerID, err); ackErr != nil {
 				return ackErr
 			}

@@ -99,6 +99,21 @@ type killMsg struct {
 	WorkerID string `json:"worker_id"`
 }
 
+type forwardMsg struct {
+	Type         string `json:"type"` // "forward"
+	CmdID        string `json:"cmd_id"`
+	WorkerID     string `json:"worker_id"`
+	ExternalPort int    `json:"external_port"`
+	InternalPort int    `json:"internal_port"`
+}
+
+type unforwardMsg struct {
+	Type         string `json:"type"` // "unforward"
+	CmdID        string `json:"cmd_id"`
+	WorkerID     string `json:"worker_id"`
+	ExternalPort int    `json:"external_port"`
+}
+
 type ackMsg struct {
 	Type     string `json:"type"` // "ack"
 	CmdID    string `json:"cmd_id"`
@@ -132,6 +147,22 @@ type Spawn struct {
 type Kill struct {
 	CmdID    string
 	WorkerID string
+}
+
+// Forward is a decoded service-forward command: expose the worker's
+// internal port on this node's ExternalPort (for the daemon-side relay).
+type Forward struct {
+	CmdID        string
+	WorkerID     string
+	ExternalPort int
+	InternalPort int
+}
+
+// Unforward is a decoded command to stop a service forward.
+type Unforward struct {
+	CmdID        string
+	WorkerID     string
+	ExternalPort int
 }
 
 // readMsg reads one length-prefixed JSON message into 'v'.
@@ -193,6 +224,7 @@ type ExitHandler func(workerID string, exitErr error)
 type node struct {
 	id       string
 	hostname string
+	ip       string // agent's source address, seen from the broker
 	tags     []string
 	lastSeen time.Time
 	sendCh   chan interface{} // outbound commands; drained by writer goroutine
@@ -207,6 +239,10 @@ type Server struct {
 	workers map[string]string // workerID -> nodeID
 	conns   map[*net.Conn]bool
 	exitCb  ExitHandler // guarded by s.mu
+	// tagNodes/tagCursor implement per-tag round-robin placement: nodes are
+	// kept in registration order per tag and Place rotates through them.
+	tagNodes  map[string][]string
+	tagCursor map[string]int
 
 	exitCh chan workerExit
 	closed chan struct{}
@@ -228,12 +264,14 @@ func Listen(addr string) (*Server, error) {
 		return nil, errors.Wrapf(err, "broker: could not listen on %s", addr)
 	}
 	s := &Server{
-		nodes:   make(map[string]*node),
-		workers: make(map[string]string),
-		conns:   make(map[*net.Conn]bool),
-		exitCh:  make(chan workerExit, 1024),
-		closed:  make(chan struct{}),
-		ln:      ln,
+		nodes:     make(map[string]*node),
+		workers:   make(map[string]string),
+		conns:     make(map[*net.Conn]bool),
+		tagNodes:  make(map[string][]string),
+		tagCursor: make(map[string]int),
+		exitCh:    make(chan workerExit, 1024),
+		closed:    make(chan struct{}),
+		ln:        ln,
 	}
 	go s.acceptLoop()
 	go s.watchdog()
@@ -254,21 +292,16 @@ func (s *Server) SetExitHandler(h ExitHandler) {
 	s.exitCb = h
 }
 
-// Place assigns workerID to a node serving 'tag' and sends it a spawn
-// command with the resolved environment. It returns ErrNoNode when no
-// matching node is registered.
-func (s *Server) Place(tag, workerID string, env []string, image, runtime string) error {
+// Place assigns workerID to a node serving one of 'tags' and sends it a
+// spawn command with the resolved environment. Placement is round-robin
+// per tag: the first tag with any registered node wins, and Place rotates
+// through that tag's nodes in registration order. (Pipelines scale to zero
+// when idle, so a fancier scheduler would buy nothing.) It returns
+// ErrNoNode when no matching node is registered.
+func (s *Server) Place(tags []string, workerID string, env []string, image, runtime string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var best *node
-	for _, n := range s.nodes {
-		if !hasTag(n.tags, tag) {
-			continue
-		}
-		if best == nil || len(n.workers) < len(best.workers) {
-			best = n
-		}
-	}
+	best := s.nextNodeLocked(tags)
 	if best == nil {
 		return ErrNoNode
 	}
@@ -314,6 +347,61 @@ func (s *Server) Kill(workerID string) {
 	}
 }
 
+// Forward asks the node running workerID to expose its InternalPort on
+// ExternalPort (for the daemon-side service relay). Best-effort.
+func (s *Server) Forward(workerID string, externalPort, internalPort int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	nodeID, ok := s.workers[workerID]
+	if !ok {
+		return
+	}
+	n, ok := s.nodes[nodeID]
+	if !ok {
+		return
+	}
+	select {
+	case n.sendCh <- forwardMsg{Type: "forward", CmdID: newCmdID(), WorkerID: workerID, ExternalPort: externalPort, InternalPort: internalPort}:
+	default:
+		log.Warnf("broker: forward queue full for %s; service %s:%d not exposed", nodeID, workerID, externalPort)
+	}
+}
+
+// Unforward asks the node running workerID to stop exposing ExternalPort.
+func (s *Server) Unforward(workerID string, externalPort int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	nodeID, ok := s.workers[workerID]
+	if !ok {
+		return
+	}
+	n, ok := s.nodes[nodeID]
+	if !ok {
+		return
+	}
+	select {
+	case n.sendCh <- unforwardMsg{Type: "unforward", CmdID: newCmdID(), WorkerID: workerID, ExternalPort: externalPort}:
+	default:
+		log.Warnf("broker: unforward queue full for %s", nodeID)
+	}
+}
+
+// NodeIP returns the LAN address the node running workerID connected from,
+// which is where its service relays listen.
+func (s *Server) NodeIP(workerID string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	nodeID, ok := s.workers[workerID]
+	if !ok {
+		return "", false
+	}
+	n, ok := s.nodes[nodeID]
+	if !ok {
+		return "", false
+	}
+	return n.ip, true
+}
+
 // handleConn manages one agent connection: registration, then a read loop
 // for heartbeats/acks and a writer goroutine for commands.
 func (s *Server) handleConn(conn net.Conn) {
@@ -340,6 +428,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	n := &node{
 		id:       fmt.Sprintf("node-%d", time.Now().UnixNano()),
 		hostname: reg.Hostname,
+		ip:       remoteIP(conn),
 		tags:     reg.Tags,
 		lastSeen: time.Now(),
 		sendCh:   make(chan interface{}, 64),
@@ -347,6 +436,9 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 	s.mu.Lock()
 	s.nodes[n.id] = n
+	for _, tag := range n.tags {
+		s.tagNodes[tag] = append(s.tagNodes[tag], n.id)
+	}
 	s.mu.Unlock()
 	log.Infof("broker: node %s (%s) registered with tags %v", n.id, reg.Hostname, reg.Tags)
 	if err := writeMsg(conn, welcomeMsg{Type: "welcome", NodeID: n.id, HeartbeatMS: int(HeartbeatInterval / time.Millisecond)}); err != nil {
@@ -447,6 +539,15 @@ func (s *Server) dropNode(n *node) {
 		return
 	}
 	delete(s.nodes, n.id)
+	for _, tag := range n.tags {
+		ids := s.tagNodes[tag]
+		for i, id := range ids {
+			if id == n.id {
+				s.tagNodes[tag] = append(ids[:i], ids[i+1:]...)
+				break
+			}
+		}
+	}
 	for workerID := range n.workers {
 		delete(s.workers, workerID)
 		exited = append(exited, workerExit{workerID: workerID, err: errors.New("broker: node lost")})
@@ -569,6 +670,27 @@ func (s *Server) NodesWithTag(tag string) int {
 	return n
 }
 
+// nextNodeLocked round-robins over the nodes registered for the first tag
+// that has any. Callers must hold s.mu.
+func (s *Server) nextNodeLocked(tags []string) *node {
+	for _, tag := range tags {
+		ids := s.tagNodes[tag]
+		if len(ids) == 0 {
+			continue
+		}
+		cursor := s.tagCursor[tag]
+		if cursor >= len(ids) {
+			cursor = 0
+		}
+		id := ids[cursor]
+		s.tagCursor[tag] = cursor + 1
+		if n, ok := s.nodes[id]; ok {
+			return n
+		}
+	}
+	return nil
+}
+
 func hasTag(tags []string, tag string) bool {
 	for _, t := range tags {
 		if t == tag {
@@ -580,6 +702,14 @@ func hasTag(tags []string, tag string) bool {
 
 func newCmdID() string {
 	return fmt.Sprintf("cmd-%d", time.Now().UnixNano())
+}
+
+// remoteIP returns the source address of the agent connection.
+func remoteIP(conn net.Conn) string {
+	if a, ok := conn.RemoteAddr().(*net.TCPAddr); ok && a != nil {
+		return a.IP.String()
+	}
+	return ""
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -656,9 +786,33 @@ func (c *Client) Recv() (interface{}, error) {
 			return nil, err
 		}
 		return &Kill{CmdID: m.CmdID, WorkerID: m.WorkerID}, nil
+	case "forward":
+		var m forwardMsg
+		if err := json.Unmarshal(payload, &m); err != nil {
+			return nil, err
+		}
+		return &Forward{CmdID: m.CmdID, WorkerID: m.WorkerID, ExternalPort: m.ExternalPort, InternalPort: m.InternalPort}, nil
+	case "unforward":
+		var m unforwardMsg
+		if err := json.Unmarshal(payload, &m); err != nil {
+			return nil, err
+		}
+		return &Unforward{CmdID: m.CmdID, WorkerID: m.WorkerID, ExternalPort: m.ExternalPort}, nil
 	default:
 		return nil, errors.Errorf("broker: unexpected message type %q", typ)
 	}
+}
+
+// LocalIP returns the local address the agent's broker connection is bound
+// to: the address the daemon sees as the node IP, and therefore the address
+// service relays should listen on (binds only the interface in use rather
+// than 0.0.0.0, which also lets a same-host agent coexist with the
+// daemon-side loopback relay).
+func (c *Client) LocalIP() string {
+	if a, ok := c.conn.LocalAddr().(*net.TCPAddr); ok && a != nil {
+		return a.IP.String()
+	}
+	return ""
 }
 
 // Close shuts down the connection.

@@ -171,7 +171,7 @@ type Runtime struct {
 	// svcForwards maps "ns/name" of a NodePort pipeline service to the TCP
 	// forward that exposes its container port on the host's loopback
 	// interface (the local stand-in for the k8s NodePort service).
-	svcForwards map[string]*tcpForward
+	svcForwards map[string]io.Closer
 
 	// svcProxyName is the docker container running the pachd HTTP service
 	// proxy (port 652 -> daemon HTTP), killed on Close.
@@ -238,7 +238,7 @@ func NewRuntime(opts Options) (*Runtime, error) {
 		secrets:     make(map[string]*v1.Secret),
 		nextIP:      2, // 127.0.0.1 is the daemon itself; workers start at 127.0.0.2
 		watchers:    make(map[int]chan watch.Event),
-		svcForwards: make(map[string]*tcpForward),
+		svcForwards: make(map[string]io.Closer),
 	}
 	if opts.Runtime == "docker" {
 		bin, err := exec.LookPath("docker")
@@ -1041,14 +1041,14 @@ func (rt *Runtime) spawnPodLocked(g *rcState) error {
 
 	env, err := rt.workerEnv(g, name, ip)
 	if err != nil {
-		rt.addFailedPodLocked(g, name, ip, "", nodeTag(g) != "" && rt.opts.Broker != nil, err)
+		rt.addFailedPodLocked(g, name, ip, "", len(nodeTags(g)) > 0 && rt.opts.Broker != nil, err)
 		return err
 	}
 
 	// Remote placement: workers whose pod template carries PACH_NODE_TAG run
 	// on a broker agent serving that tag (see Options.Broker). The agent
 	// owns the worker's scratch dirs and execs the worker binary itself.
-	if tag := nodeTag(g); tag != "" && rt.opts.Broker != nil {
+	if tags := nodeTags(g); len(tags) > 0 && rt.opts.Broker != nil {
 		logPath := filepath.Join(rt.opts.LocalDir, "logs", name+".jsonl")
 		if err := os.MkdirAll(filepath.Dir(logPath), 0777); err != nil {
 			return errors.Wrapf(err, "could not create log dir")
@@ -1058,8 +1058,8 @@ func (rt *Runtime) spawnPodLocked(g *rcState) error {
 		if err := ioutil.WriteFile(logPath, nil, 0644); err != nil {
 			return errors.Wrapf(err, "could not create log file")
 		}
-		if err := rt.opts.Broker.Place(tag, name, env, workerImage(g), rt.opts.Runtime); err != nil {
-			rt.addFailedPodLocked(g, name, ip, logPath, true, errors.Wrapf(err, "no agent available for node tag %q", tag))
+		if err := rt.opts.Broker.Place(tags, name, env, workerImage(g), rt.opts.Runtime); err != nil {
+			rt.addFailedPodLocked(g, name, ip, logPath, true, errors.Wrapf(err, "no agent available for node tags %v", tags))
 			return err
 		}
 		p := &podState{
@@ -1071,7 +1071,8 @@ func (rt *Runtime) spawnPodLocked(g *rcState) error {
 		}
 		g.pods = append(g.pods, p)
 		rt.emitLocked(g, watch.Added, p.podObj(g.ns))
-		log.Infof("localclient: placed worker %s on agent for tag %q", name, tag)
+		log.Infof("localclient: placed worker %s on agent for tags %v", name, tags)
+		rt.reconcileServiceForwardLocked(g)
 		return nil
 	}
 
@@ -1184,14 +1185,18 @@ func (rt *Runtime) addFailedPodLocked(g *rcState, name, ip, logPath string, remo
 // user code children die too) and removes it from g. Callers must hold rt.mu.
 func (rt *Runtime) killPodLocked(g *rcState, p *podState) {
 	if p.remote {
-		if rt.opts.Broker != nil {
-			rt.opts.Broker.Kill(p.name)
-		}
 		for i := range g.pods {
 			if g.pods[i] == p {
 				g.pods = append(g.pods[:i], g.pods[i+1:]...)
 				break
 			}
+		}
+		if rt.opts.Broker != nil {
+			rt.opts.Broker.Kill(p.name)
+			// The worker's service relay dies with it; re-point any
+			// remaining service forward at a surviving worker (or back to
+			// local semantics when none are left).
+			rt.reconcileServiceForwardLocked(g)
 		}
 		log.Infof("localclient: stopped remote worker %s", p.name)
 		rt.emitLocked(g, watch.Deleted, p.podObj(g.ns))
@@ -1289,21 +1294,27 @@ func workerImage(g *rcState) string {
 	return ""
 }
 
-// nodeTag returns the PACH_NODE_TAG env var from the worker pod template, or
-
-// "" if the pipeline does not request placement on a tagged broker node.
-func nodeTag(g *rcState) string {
+// nodeTags returns the tags the pipeline requests placement on (the
+// PACH_NODE_TAG env var in the worker pod template, comma-separated for
+// multiple acceptable nodes), or nil if the pipeline runs locally.
+func nodeTags(g *rcState) []string {
 	for _, c := range g.rc.Spec.Template.Spec.Containers {
 		if c.Name != client.PPSWorkerUserContainerName {
 			continue
 		}
 		for _, e := range c.Env {
 			if e.Name == "PACH_NODE_TAG" {
-				return e.Value
+				var tags []string
+				for _, t := range strings.Split(e.Value, ",") {
+					if t = strings.TrimSpace(t); t != "" {
+						tags = append(tags, t)
+					}
+				}
+				return tags
 			}
 		}
 	}
-	return ""
+	return nil
 }
 
 // HandleRemoteWorkerExit is the broker's worker-exit callback (wired via
@@ -1368,19 +1379,19 @@ func (rt *Runtime) restartPodLocked(g *rcState, p *podState) error {
 		if err != nil {
 			return err
 		}
-		tag := nodeTag(g)
-		if rt.opts.Broker == nil || tag == "" {
+		tags := nodeTags(g)
+		if rt.opts.Broker == nil || len(tags) == 0 {
 			return errors.Errorf("localclient: remote worker %s has no broker to restart on", p.name)
 		}
-		if err := rt.opts.Broker.Place(tag, p.name, env, workerImage(g), rt.opts.Runtime); err != nil {
-			return errors.Wrapf(err, "no agent available for node tag %q", tag)
+		if err := rt.opts.Broker.Place(tags, p.name, env, workerImage(g), rt.opts.Runtime); err != nil {
+			return errors.Wrapf(err, "no agent available for node tags %v", tags)
 		}
 		p.mu.Lock()
 		p.exitErr = nil
 		p.spawnFailed = false
 		p.mu.Unlock()
 		rt.emitLocked(g, watch.Modified, p.podObj(g.ns)) // Running again
-		log.Infof("localclient: re-placed remote worker %s on tag %q", p.name, tag)
+		log.Infof("localclient: re-placed remote worker %s on tags %v", p.name, tags)
 		return nil
 	}
 	logFile, err := os.OpenFile(p.logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
@@ -1879,6 +1890,18 @@ func (rt *Runtime) deleteService(ns, name string) error {
 // a "user-port" (pipeline services); the pachyderm-internal service for each
 // pipeline has no user-port and needs no forward.
 func (rt *Runtime) maybeStartServiceForward(key string, svc *v1.Service) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	// If the pipeline's RC already exists, its workers may be broker-placed;
+	// let the reconcile decide local vs remote forwarding.
+	if pipelineName := svc.Labels["pipelineName"]; pipelineName != "" {
+		for _, g := range rt.rcs {
+			if g.rc.Spec.Template.Labels["pipelineName"] == pipelineName {
+				rt.reconcileServiceForwardLocked(g)
+				return
+			}
+		}
+	}
 	for _, p := range svc.Spec.Ports {
 		if p.Name != "user-port" {
 			continue
@@ -1891,8 +1914,6 @@ func (rt *Runtime) maybeStartServiceForward(key string, svc *v1.Service) {
 		if externalPort == 0 || internalPort == 0 || externalPort == internalPort {
 			return // nothing to forward (same port is already host-reachable)
 		}
-		rt.mu.Lock()
-		defer rt.mu.Unlock()
 		if _, ok := rt.svcForwards[key]; ok {
 			return
 		}
@@ -1906,6 +1927,77 @@ func (rt *Runtime) maybeStartServiceForward(key string, svc *v1.Service) {
 	}
 }
 
+// reconcileServiceForwardLocked makes the pipeline's service reachable at
+// 127.0.0.1:<external> on the daemon host no matter where the workers run:
+// loopback->loopback for local workers, or loopback-><node IP>:<external>
+// for broker-placed workers (the node's agent relays that to the worker's
+// internal port). Callers must hold rt.mu.
+func (rt *Runtime) reconcileServiceForwardLocked(g *rcState) {
+	if rt.opts.Broker == nil {
+		return
+	}
+	pipelineName := g.rc.Spec.Template.Labels["pipelineName"]
+	if pipelineName == "" {
+		return
+	}
+	var remotePod *podState
+	for _, p := range g.pods {
+		if p.remote {
+			remotePod = p
+			break
+		}
+	}
+	for key, svc := range rt.services {
+		if svc.Labels["pipelineName"] != pipelineName {
+			continue
+		}
+		for _, port := range svc.Spec.Ports {
+			if port.Name != "user-port" {
+				continue
+			}
+			externalPort := int(port.Port)
+			internalPort := externalPort
+			if port.TargetPort.IntValue() != 0 {
+				internalPort = port.TargetPort.IntValue()
+			}
+			if externalPort == 0 || internalPort == 0 {
+				continue
+			}
+			if remotePod == nil {
+				// All-local workers: the plain loopback forward.
+				if _, ok := rt.svcForwards[key]; ok {
+					continue
+				}
+				f, err := newTCPForward(externalPort, internalPort)
+				if err != nil {
+					log.Warnf("localclient: could not forward service %s port %d->%d: %v", key, externalPort, internalPort, err)
+					continue
+				}
+				rt.svcForwards[key] = f
+				continue
+			}
+			// Broker-placed worker: ask its node to expose the port, then
+			// relay the daemon's loopback external port to that node.
+			nodeIP, ok := rt.opts.Broker.NodeIP(remotePod.name)
+			if !ok {
+				continue
+			}
+			rt.opts.Broker.Forward(remotePod.name, externalPort, internalPort)
+			if f, ok := rt.svcForwards[key]; ok {
+				f.Close()
+				delete(rt.svcForwards, key)
+			}
+			f, err := newTCPForwardTo("127.0.0.1", externalPort,
+				net.JoinHostPort(nodeIP, strconv.Itoa(externalPort)))
+			if err != nil {
+				log.Warnf("localclient: could not forward service %s to node %s port %d: %v", key, nodeIP, externalPort, err)
+				continue
+			}
+			rt.svcForwards[key] = f
+		}
+	}
+}
+
 // tcpForward is a small host-side proxy from a fixed loopback port to a
 // worker's listener (which, with host networking, is also on loopback).
 type tcpForward struct {
@@ -1916,14 +2008,21 @@ type tcpForward struct {
 }
 
 func newTCPForward(externalPort, internalPort int) (*tcpForward, error) {
-	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(externalPort)))
+	return newTCPForwardTo("127.0.0.1", externalPort, net.JoinHostPort("127.0.0.1", strconv.Itoa(internalPort)))
+}
+
+// newTCPForwardTo is the general form: a loopback (or any) host port
+// relaying to an arbitrary target. The remote-worker service relay uses it
+// with the node's address as the target.
+func newTCPForwardTo(host string, externalPort int, target string) (*tcpForward, error) {
+	ln, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(externalPort)))
 	if err != nil {
 		return nil, err
 	}
 	f := &tcpForward{
 		ln:     ln,
 		done:   make(chan struct{}),
-		target: net.JoinHostPort("127.0.0.1", strconv.Itoa(internalPort)),
+		target: target,
 	}
 	go f.serve()
 	return f, nil
