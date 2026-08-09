@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"bytes"
 	"encoding/json"
 	"io/ioutil"
 	"net"
@@ -269,11 +270,45 @@ func (r *proxyRCs) Watch(_ metav1.ListOptions) (watch.Interface, error) {
 func (r *proxyRCs) Patch(name string, _ types.PatchType, _ []byte, _ ...string) (*v1.ReplicationController, error) {
 	return nil, r.notFound(name)
 }
-func (r *proxyRCs) GetScale(string, metav1.GetOptions) (*autoscalingv1.Scale, error) {
-	return nil, r.notSupported("getting scale of")
+func (r *proxyRCs) GetScale(name string, _ metav1.GetOptions) (*autoscalingv1.Scale, error) {
+	rc, err := r.Get(name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return rcScale(rc), nil
 }
-func (r *proxyRCs) UpdateScale(string, *autoscalingv1.Scale) (*autoscalingv1.Scale, error) {
-	return nil, r.notSupported("updating scale of")
+func (r *proxyRCs) UpdateScale(name string, scale *autoscalingv1.Scale) (*autoscalingv1.Scale, error) {
+	u := localKubeHTTPBase() + "rcs/" + url.PathEscape(name) + "/scale?namespace=" + url.QueryEscape(r.ns)
+	body, err := json.Marshal(struct {
+		Replicas int32 `json:"replicas"`
+	}{Replicas: scale.Spec.Replicas})
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.Post(u, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, errors.Wrapf(err, "could not update scale of %s in local kube store", r.kind)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, errors.Errorf("local kube store returned %d for %s scale", resp.StatusCode, r.kind)
+	}
+	var out autoscalingv1.Scale
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func rcScale(rc *v1.ReplicationController) *autoscalingv1.Scale {
+	replicas := int32(0)
+	if rc.Spec.Replicas != nil {
+		replicas = *rc.Spec.Replicas
+	}
+	return &autoscalingv1.Scale{
+		ObjectMeta: metav1.ObjectMeta{Name: rc.Name, Namespace: rc.Namespace},
+		Spec:       autoscalingv1.ScaleSpec{Replicas: replicas},
+	}
 }
 
 // proxyPods implements v1core.PodInterface.

@@ -45,6 +45,10 @@ import (
 
 const crashingBackoff = time.Second * 15
 
+// scaleUpInterval is how often the autoscaling monitor checks for
+// outstanding (unclaimed) tasks and scales the pipeline's workers up.
+const scaleUpInterval = time.Second * 30
+
 //////////////////////////////////////////////////////////////////////////////
 //                     Locking Functions                                    //
 // - These functions lock monitorCancelsMu in order to start or stop a      //
@@ -340,7 +344,7 @@ func (m *ppsMaster) monitorPipeline(pachClient *client.APIClient, pipelineInfo *
 			}, backoff.NewInfiniteBackOff(),
 				backoff.NotifyCtx(pachClient.Ctx(), "monitorPipeline for "+pipeline))
 		})
-		if pipelineInfo.ParallelismSpec.Constant > 1 && pipelineInfo.Autoscaling {
+		if pipelineInfo.ParallelismSpec != nil && pipelineInfo.ParallelismSpec.Constant > 1 && pipelineInfo.Autoscaling {
 			eg.Go(func() error {
 				return backoff.RetryNotify(func() error {
 					worker := work.NewWorker(
@@ -354,6 +358,9 @@ func (m *ppsMaster) monitorPipeline(pachClient *client.APIClient, pipelineInfo *
 							return err
 						}
 						if unclaimedTasks > 0 {
+							// TODO route this through the controller rather
+							// than modifying the RC directly. This will
+							// prevent a potential race condition.
 							kubeClient := m.a.env.GetKubeClient()
 							namespace := m.a.namespace
 							rc := kubeClient.CoreV1().ReplicationControllers(namespace)
@@ -362,9 +369,21 @@ func (m *ppsMaster) monitorPipeline(pachClient *client.APIClient, pipelineInfo *
 							if n > int64(pipelineInfo.ParallelismSpec.Constant) {
 								n = int64(pipelineInfo.ParallelismSpec.Constant)
 							}
-							// Scale the rc
+							if err != nil {
+								return err
+							}
+							if int64(scale.Spec.Replicas) < n {
+								scale.Spec.Replicas = int32(n)
+								if _, err := rc.UpdateScale(pipelineInfo.WorkerRc, scale); err != nil {
+									return err
+								}
+							}
 						}
-						time.Sleep(time.Second * 5)
+						select {
+						case <-time.After(scaleUpInterval):
+						case <-pachClient.Ctx().Done():
+							return pachClient.Ctx().Err()
+						}
 					}
 				}, backoff.NewInfiniteBackOff(),
 					backoff.NotifyCtx(pachClient.Ctx(), "monitorPipeline for "+pipeline))

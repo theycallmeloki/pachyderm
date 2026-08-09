@@ -74,6 +74,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	v1 "k8s.io/api/core/v1"
+	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -417,10 +418,21 @@ const kubeListPrefix = "/v1/local/kube/"
 
 // KubeHTTPHandler wraps an HTTP handler (the pachd HTTP API) with the
 // local-mode k8s object store. GETs under kubeListPrefix are served from the
-// runtime's in-memory stores; everything else passes through to inner.
+// runtime's in-memory stores; the scale subresource under the same prefix is
+// writable so the autoscaling monitor and suite tests can change an RC's
+// replica count (which reconcileLocked turns into worker spawns/kills).
+// Everything else passes through to inner.
 func (rt *Runtime) KubeHTTPHandler(inner http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, kubeListPrefix) {
+		if !strings.HasPrefix(r.URL.Path, kubeListPrefix) {
+			inner.ServeHTTP(w, r)
+			return
+		}
+		if r.Method == http.MethodPost {
+			rt.serveScale(w, r)
+			return
+		}
+		if r.Method != http.MethodGet {
 			inner.ServeHTTP(w, r)
 			return
 		}
@@ -454,6 +466,40 @@ func (rt *Runtime) KubeHTTPHandler(inner http.Handler) http.Handler {
 			log.Warnf("localclient: could not encode kube %s list: %v", kind, err)
 		}
 	})
+}
+
+// serveScale handles POST /v1/local/kube/rcs/<name>/scale with a JSON body of
+// {"replicas": N}, mirroring the k8s Scale subresource. It is used by the
+// suite's autoscaling test to drive replica counts from outside the daemon.
+func (rt *Runtime) serveScale(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, kubeListPrefix)
+	parts := strings.Split(rest, "/")
+	if len(parts) != 3 || parts[0] != "rcs" || parts[2] != "scale" {
+		http.NotFound(w, r)
+		return
+	}
+	var req struct {
+		Replicas int32 `json:"replicas"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	rc, err := rt.getRC(r.URL.Query().Get("namespace"), parts[1])
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	rc.Spec.Replicas = &req.Replicas
+	updated, err := rt.updateRC(r.URL.Query().Get("namespace"), rc)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(rcToScale(updated)); err != nil {
+		log.Warnf("localclient: could not encode scale response: %v", err)
+	}
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -528,6 +574,42 @@ func (r *rcs) List(opts metav1.ListOptions) (*v1.ReplicationControllerList, erro
 	return r.runtime.listRCs(r.ns, opts)
 }
 
+// GetScale reports the RC's current replica count (the autoscaling monitor
+// reads it before deciding to scale up).
+func (r *rcs) GetScale(name string, _ metav1.GetOptions) (*autoscalingv1.Scale, error) {
+	rc, err := r.runtime.getRC(r.ns, name)
+	if err != nil {
+		return nil, err
+	}
+	return rcToScale(rc), nil
+}
+
+// UpdateScale sets the RC's desired replica count; reconcileLocked spawns or
+// kills worker processes to match, so autoscaling genuinely changes the
+// number of local workers.
+func (r *rcs) UpdateScale(name string, scale *autoscalingv1.Scale) (*autoscalingv1.Scale, error) {
+	rc, err := r.runtime.getRC(r.ns, name)
+	if err != nil {
+		return nil, err
+	}
+	rc.Spec.Replicas = &scale.Spec.Replicas
+	if _, err := r.runtime.updateRC(r.ns, rc); err != nil {
+		return nil, err
+	}
+	return rcToScale(rc), nil
+}
+
+func rcToScale(rc *v1.ReplicationController) *autoscalingv1.Scale {
+	replicas := int32(0)
+	if rc.Spec.Replicas != nil {
+		replicas = *rc.Spec.Replicas
+	}
+	return &autoscalingv1.Scale{
+		ObjectMeta: metav1.ObjectMeta{Name: rc.Name, Namespace: rc.Namespace},
+		Spec:       autoscalingv1.ScaleSpec{Replicas: replicas},
+	}
+}
+
 func (rt *Runtime) createRC(ns string, rc *v1.ReplicationController) (*v1.ReplicationController, error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -542,6 +624,17 @@ func (rt *Runtime) createRC(ns string, rc *v1.ReplicationController) (*v1.Replic
 	rt.rcs[key] = g
 	rt.reconcileLocked(g)
 	return rt.rcs[key].rc.DeepCopy(), nil
+}
+
+func (rt *Runtime) getRC(ns string, name string) (*v1.ReplicationController, error) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	key := ns + "/" + name
+	g, ok := rt.rcs[key]
+	if !ok {
+		return nil, kubeerrors.NewNotFound(schema.GroupResource{Group: "", Resource: "replicationcontrollers"}, name)
+	}
+	return g.rc.DeepCopy(), nil
 }
 
 func (rt *Runtime) updateRC(ns string, rc *v1.ReplicationController) (*v1.ReplicationController, error) {
