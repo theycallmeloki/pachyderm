@@ -35,11 +35,11 @@ import (
 	pach_http "github.com/pachyderm/pachyderm/src/server/http"
 	"github.com/pachyderm/pachyderm/src/server/pfs/s3"
 	pfs_server "github.com/pachyderm/pachyderm/src/server/pfs/server"
+	"github.com/pachyderm/pachyderm/src/server/pkg/broker"
 	cache_pb "github.com/pachyderm/pachyderm/src/server/pkg/cache/groupcachepb"
 	cache_server "github.com/pachyderm/pachyderm/src/server/pkg/cache/server"
 	"github.com/pachyderm/pachyderm/src/server/pkg/cmdutil"
 	col "github.com/pachyderm/pachyderm/src/server/pkg/collection"
-	"github.com/pachyderm/pachyderm/src/server/pkg/workerconfig"
 	"github.com/pachyderm/pachyderm/src/server/pkg/hashtree"
 	"github.com/pachyderm/pachyderm/src/server/pkg/localclient"
 	"github.com/pachyderm/pachyderm/src/server/pkg/localetcd"
@@ -49,6 +49,7 @@ import (
 	"github.com/pachyderm/pachyderm/src/server/pkg/serviceenv"
 	txnenv "github.com/pachyderm/pachyderm/src/server/pkg/transactionenv"
 	"github.com/pachyderm/pachyderm/src/server/pkg/uuid"
+	"github.com/pachyderm/pachyderm/src/server/pkg/workerconfig"
 	pps_server "github.com/pachyderm/pachyderm/src/server/pps/server"
 	"github.com/pachyderm/pachyderm/src/server/pps/server/githook"
 	txnserver "github.com/pachyderm/pachyderm/src/server/transaction/server"
@@ -428,6 +429,22 @@ func doLocalMode(config interface{}) (retErr error) {
 			pachctlBinary = candidate
 		}
 	}
+	// Broker: lets workers run on remote nodes (see src/server/pkg/broker).
+	// An agent on another machine registers here and receives spawn/kill
+	// commands; pipelines opt in with a PACH_NODE_TAG env var. Disabled by
+	// setting PACH_BROKER_ADDRESS to "off".
+	var bs *broker.Server
+	if addr := os.Getenv("PACH_BROKER_ADDRESS"); addr != "off" {
+		if addr == "" {
+			addr = "127.0.0.1:30660"
+		}
+		var err error
+		bs, err = broker.Listen(addr)
+		if err != nil {
+			return errors.Wrapf(err, "could not start node broker on %s", addr)
+		}
+		log.Printf("local mode: node broker listening on %s", addr)
+	}
 	rt, err := localclient.NewRuntime(localclient.Options{
 		WorkerBinary:   workerBinary,
 		PachctlBinary:  pachctlBinary,
@@ -440,9 +457,13 @@ func doLocalMode(config interface{}) (retErr error) {
 		Runtime:        os.Getenv("PACH_WORKER_RUNTIME"),
 		DaemonPodName:  env.PachdPodName,
 		DaemonHTTPPort: int(env.HTTPPort),
+		Broker:         bs,
 	})
 	if err != nil {
 		return errors.Wrapf(err, "could not start local worker runtime")
+	}
+	if bs != nil {
+		bs.SetExitHandler(rt.HandleRemoteWorkerExit)
 	}
 	env.InstallLocalKube(localclient.NewClientset(rt))
 	// Kill worker processes when the daemon exits (normally or via signal), so

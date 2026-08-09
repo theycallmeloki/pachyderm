@@ -16,6 +16,12 @@ type GlobalConfiguration struct {
 	Port          uint16 `env:"PORT,default=650"`
 	HTTPPort      uint16 `env:"HTTP_PORT,default=652"`
 	PeerPort      uint16 `env:"PEER_PORT,default=653"`
+	// PeerAddress overrides the pachd address that workers connect to
+	// (host:port, no scheme). It defaults to 127.0.0.1:PeerPort (correct in
+	// k8s, where the worker shares the pachd network, and in single-node
+	// local mode). The broker agent sets it on remote nodes so workers there
+	// reach the daemon over the LAN.
+	PeerAddress   string `env:"PACH_PEER_ADDRESS"`
 	S3GatewayPort uint16 `env:"S3GATEWAY_PORT,default=600"`
 	PPSEtcdPrefix string `env:"PPS_ETCD_PREFIX,default=pachyderm_pps"`
 	Namespace     string `env:"PACH_NAMESPACE,default=default"`

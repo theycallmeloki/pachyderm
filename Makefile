@@ -52,6 +52,10 @@ install-clean:
 	@rm -f $(GOBIN)/pachctl
 	@make install
 
+install-agent:
+	# GOPATH/bin must be on your PATH to access this binary:
+	go install ./src/server/cmd/agent
+
 install-doc:
 	go install -gcflags "$(GC_FLAGS)" ./src/server/cmd/pachctl-doc
 

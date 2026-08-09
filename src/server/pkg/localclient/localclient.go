@@ -88,6 +88,8 @@ import (
 
 	"github.com/pachyderm/pachyderm/src/client"
 	"github.com/pachyderm/pachyderm/src/client/pkg/errors"
+	"github.com/pachyderm/pachyderm/src/server/pkg/broker"
+	"github.com/pachyderm/pachyderm/src/server/pkg/podrunner"
 )
 
 // Options configures a Runtime.
@@ -131,6 +133,11 @@ type Options struct {
 	// port 652 (the k8s in-cluster HTTP port) to it so that user code inside
 	// workers can reach pachd by its cluster DNS name.
 	DaemonHTTPPort int
+	// Broker is the node broker (see src/server/pkg/broker). When set, worker
+	// replicas whose pod template carries a PACH_NODE_TAG env var are placed
+	// on a registered agent serving that tag instead of running locally.
+	// Nil disables remote placement.
+	Broker *broker.Server
 }
 
 // Clientset is a kubernetes.Interface whose CoreV1 resources are backed by a
@@ -188,6 +195,12 @@ type podState struct {
 	cmd     *exec.Cmd
 	logPath string
 	group   *rcState
+
+	// remote is set when this worker runs on a broker agent (see
+	// Options.Broker) rather than as a local process. Remote pods have no
+	// local cmd; their lifecycle is driven by broker node reports via
+	// HandleRemoteWorkerExit.
+	remote bool
 
 	// spawnFailed is set when the pod could not be started at all (as
 	// opposed to started and then exited); it selects the failure reason
@@ -1026,6 +1039,42 @@ func (rt *Runtime) spawnPodLocked(g *rcState) error {
 	name := fmt.Sprintf("%s-%04d", g.rc.Name, idx)
 	ip := rt.allocIP()
 
+	env, err := rt.workerEnv(g, name, ip)
+	if err != nil {
+		rt.addFailedPodLocked(g, name, ip, "", nodeTag(g) != "" && rt.opts.Broker != nil, err)
+		return err
+	}
+
+	// Remote placement: workers whose pod template carries PACH_NODE_TAG run
+	// on a broker agent serving that tag (see Options.Broker). The agent
+	// owns the worker's scratch dirs and execs the worker binary itself.
+	if tag := nodeTag(g); tag != "" && rt.opts.Broker != nil {
+		logPath := filepath.Join(rt.opts.LocalDir, "logs", name+".jsonl")
+		if err := os.MkdirAll(filepath.Dir(logPath), 0777); err != nil {
+			return errors.Wrapf(err, "could not create log dir")
+		}
+		// Touch an empty local log file so pod log queries succeed (the real
+		// output lives on the agent; streaming it is a later phase).
+		if err := ioutil.WriteFile(logPath, nil, 0644); err != nil {
+			return errors.Wrapf(err, "could not create log file")
+		}
+		if err := rt.opts.Broker.Place(tag, name, env, workerImage(g), rt.opts.Runtime); err != nil {
+			rt.addFailedPodLocked(g, name, ip, logPath, true, errors.Wrapf(err, "no agent available for node tag %q", tag))
+			return err
+		}
+		p := &podState{
+			name:    name,
+			ip:      ip,
+			logPath: logPath,
+			group:   g,
+			remote:  true,
+		}
+		g.pods = append(g.pods, p)
+		rt.emitLocked(g, watch.Added, p.podObj(g.ns))
+		log.Infof("localclient: placed worker %s on agent for tag %q", name, tag)
+		return nil
+	}
+
 	scratch := filepath.Join(rt.opts.LocalDir, "workers", name)
 	if err := os.MkdirAll(filepath.Join(scratch, client.PPSInputPrefix), 0777); err != nil {
 		return errors.Wrapf(err, "could not create worker scratch dir")
@@ -1048,40 +1097,35 @@ func (rt *Runtime) spawnPodLocked(g *rcState) error {
 		return errors.Wrapf(err, "could not open log file %q", logPath)
 	}
 
-	env, err := rt.workerEnv(g, name, ip)
-	if err != nil {
-		logFile.Close()
-		rt.addFailedPodLocked(g, name, ip, logPath, err)
-		return err
-	}
-
+	// env was already resolved above (shared with the remote-placement
+	// branch); the local and remote paths diverge only in how they run it.
 	cmd, err := rt.workerCmd(g, name, ip, env)
 	if err != nil {
 		logFile.Close()
-		rt.addFailedPodLocked(g, name, ip, logPath, err)
+		rt.addFailedPodLocked(g, name, ip, logPath, false, err)
 		return err
 	}
 	if rt.opts.Runtime == "docker" {
 		if err := rt.preflightImage(g); err != nil {
 			logFile.Close()
-			rt.addFailedPodLocked(g, name, ip, logPath, err)
+			rt.addFailedPodLocked(g, name, ip, logPath, false, err)
 			return err
 		}
 	}
 	cmd.Env = append(os.Environ(), env...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
+	proc, err := podrunner.Start(name, cmd)
+	if err != nil {
 		logFile.Close()
-		rt.addFailedPodLocked(g, name, ip, logPath, err)
+		rt.addFailedPodLocked(g, name, ip, logPath, false, err)
 		return errors.Wrapf(err, "could not start worker process for %q", name)
 	}
 
 	p := &podState{
 		name:    name,
 		ip:      ip,
-		cmd:     cmd,
+		cmd:     proc.Cmd,
 		logPath: logPath,
 		group:   g,
 	}
@@ -1098,12 +1142,13 @@ func (rt *Runtime) spawnPodLocked(g *rcState) error {
 // CRASHING instead of the master retrying forever with no visible progress),
 // and retries the spawn with backoff until it succeeds or the RC goes away
 // (k8s CrashLoopBackOff semantics). Callers must hold rt.mu.
-func (rt *Runtime) addFailedPodLocked(g *rcState, name, ip, logPath string, spawnErr error) {
+func (rt *Runtime) addFailedPodLocked(g *rcState, name, ip, logPath string, remote bool, spawnErr error) {
 	p := &podState{
 		name:        name,
 		ip:          ip,
 		logPath:     logPath,
 		group:       g,
+		remote:      remote,
 		spawnFailed: true,
 		exitErr:     spawnErr,
 	}
@@ -1138,6 +1183,20 @@ func (rt *Runtime) addFailedPodLocked(g *rcState, name, ip, logPath string, spaw
 // killPodLocked terminates one worker process (its whole process group, so
 // user code children die too) and removes it from g. Callers must hold rt.mu.
 func (rt *Runtime) killPodLocked(g *rcState, p *podState) {
+	if p.remote {
+		if rt.opts.Broker != nil {
+			rt.opts.Broker.Kill(p.name)
+		}
+		for i := range g.pods {
+			if g.pods[i] == p {
+				g.pods = append(g.pods[:i], g.pods[i+1:]...)
+				break
+			}
+		}
+		log.Infof("localclient: stopped remote worker %s", p.name)
+		rt.emitLocked(g, watch.Deleted, p.podObj(g.ns))
+		return
+	}
 	if p.cmd != nil && p.cmd.Process != nil {
 		if rt.opts.Runtime == "docker" {
 			// Stop the container first; the foreground `docker run` CLI then
@@ -1147,9 +1206,7 @@ func (rt *Runtime) killPodLocked(g *rcState, p *podState) {
 			}
 		}
 		// Kill the process group so user-code children are not orphaned.
-		syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
-		p.cmd.Process.Kill()
-		p.cmd.Wait()
+		(&podrunner.Proc{ID: p.name, Cmd: p.cmd}).Kill()
 		rt.forgetPID(p.cmd.Process.Pid)
 	}
 	for i := range g.pods {
@@ -1220,9 +1277,112 @@ func (rt *Runtime) monitorPod(g *rcState, p *podState) {
 	}
 }
 
+// workerImage returns the pipeline's image from the worker pod template (the
+// user container), or "" if the pipeline has no image (process-mode workers
+// ignore the image entirely).
+func workerImage(g *rcState) string {
+	for _, c := range g.rc.Spec.Template.Spec.Containers {
+		if c.Name == client.PPSWorkerUserContainerName {
+			return c.Image
+		}
+	}
+	return ""
+}
+
+// nodeTag returns the PACH_NODE_TAG env var from the worker pod template, or
+
+// "" if the pipeline does not request placement on a tagged broker node.
+func nodeTag(g *rcState) string {
+	for _, c := range g.rc.Spec.Template.Spec.Containers {
+		if c.Name != client.PPSWorkerUserContainerName {
+			continue
+		}
+		for _, e := range c.Env {
+			if e.Name == "PACH_NODE_TAG" {
+				return e.Value
+			}
+		}
+	}
+	return ""
+}
+
+// HandleRemoteWorkerExit is the broker's worker-exit callback (wired via
+// Server.SetExitHandler). It marks the worker's pod Failed and restarts it
+// with backoff, mirroring monitorPod's RestartPolicy: Always behavior for
+// local workers. It is called from the broker's drain goroutine, so it must
+// not hold any broker locks.
+func (rt *Runtime) HandleRemoteWorkerExit(workerID string, exitErr error) {
+	rt.mu.Lock()
+	var g *rcState
+	var p *podState
+	for _, rc := range rt.rcs {
+		for _, pod := range rc.pods {
+			if pod.name == workerID {
+				g, p = rc, pod
+				break
+			}
+		}
+		if g != nil {
+			break
+		}
+	}
+	if g == nil || p == nil || !p.remote {
+		rt.mu.Unlock()
+		return
+	}
+	p.mu.Lock()
+	p.exitErr = exitErr
+	p.mu.Unlock()
+	rt.emitLocked(g, watch.Modified, p.podObj(g.ns)) // Failed
+	rt.mu.Unlock()
+
+	log.Errorf("localclient: remote worker %s exited: %v; restarting", workerID, exitErr)
+	time.Sleep(2 * time.Second)
+
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	// Check again under the lock; the RC may have been deleted or scaled down.
+	stillWanted := false
+	for _, q := range g.pods {
+		if q == p {
+			stillWanted = true
+			break
+		}
+	}
+	if !stillWanted {
+		return
+	}
+	p.mu.Lock()
+	p.restarts++
+	p.mu.Unlock()
+	if err := rt.restartPodLocked(g, p); err != nil {
+		log.Errorf("localclient: could not restart remote worker %s: %v", workerID, err)
+	}
+}
+
 // restartPodLocked starts a fresh process for a crashed pod, reusing its name
 // and IP. Callers must hold rt.mu.
 func (rt *Runtime) restartPodLocked(g *rcState, p *podState) error {
+	if p.remote {
+		env, err := rt.workerEnv(g, p.name, p.ip)
+		if err != nil {
+			return err
+		}
+		tag := nodeTag(g)
+		if rt.opts.Broker == nil || tag == "" {
+			return errors.Errorf("localclient: remote worker %s has no broker to restart on", p.name)
+		}
+		if err := rt.opts.Broker.Place(tag, p.name, env, workerImage(g), rt.opts.Runtime); err != nil {
+			return errors.Wrapf(err, "no agent available for node tag %q", tag)
+		}
+		p.mu.Lock()
+		p.exitErr = nil
+		p.spawnFailed = false
+		p.mu.Unlock()
+		rt.emitLocked(g, watch.Modified, p.podObj(g.ns)) // Running again
+		log.Infof("localclient: re-placed remote worker %s on tag %q", p.name, tag)
+		return nil
+	}
 	logFile, err := os.OpenFile(p.logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
@@ -1240,12 +1400,12 @@ func (rt *Runtime) restartPodLocked(g *rcState, p *podState) error {
 	cmd.Env = append(os.Environ(), env...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
+	proc, err := podrunner.Start(p.name, cmd)
+	if err != nil {
 		logFile.Close()
 		return errors.Wrapf(err, "could not restart worker process for %q", p.name)
 	}
-	p.cmd = cmd
+	p.cmd = proc.Cmd
 	p.mu.Lock()
 	p.exitErr = nil
 	p.spawnFailed = false
