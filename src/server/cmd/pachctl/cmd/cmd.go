@@ -22,7 +22,6 @@ import (
 	authcmds "github.com/pachyderm/pachyderm/src/server/auth/cmds"
 	"github.com/pachyderm/pachyderm/src/server/cmd/pachctl/shell"
 	configcmds "github.com/pachyderm/pachyderm/src/server/config"
-	debugcmds "github.com/pachyderm/pachyderm/src/server/debug/cmds"
 	pfscmds "github.com/pachyderm/pachyderm/src/server/pfs/cmds"
 	"github.com/pachyderm/pachyderm/src/server/pkg/cmdutil"
 	logutil "github.com/pachyderm/pachyderm/src/server/pkg/log"
@@ -520,7 +519,6 @@ This resets the cluster to its initial state.`,
 	}
 	subcommands = append(subcommands, cmdutil.CreateAlias(deleteAll, "delete all"))
 
-
 	var install bool
 	var installPathBash string
 	completionBash := &cobra.Command{
@@ -671,7 +669,6 @@ This resets the cluster to its initial state.`,
 	subcommands = append(subcommands, ppscmds.Cmds()...)
 	subcommands = append(subcommands, authcmds.Cmds()...)
 	subcommands = append(subcommands, admincmds.Cmds()...)
-	subcommands = append(subcommands, debugcmds.Cmds()...)
 	subcommands = append(subcommands, txncmds.Cmds()...)
 	subcommands = append(subcommands, configcmds.Cmds()...)
 

@@ -5,7 +5,6 @@ import (
 
 	"github.com/pachyderm/pachyderm/src/client/admin"
 	"github.com/pachyderm/pachyderm/src/client/auth"
-	"github.com/pachyderm/pachyderm/src/client/debug"
 	"github.com/pachyderm/pachyderm/src/client/pfs"
 	"github.com/pachyderm/pachyderm/src/client/pkg/grpcutil"
 	"github.com/pachyderm/pachyderm/src/client/pps"
@@ -215,10 +214,6 @@ type transactionBuilderClient struct {
 	tb *TransactionBuilder
 }
 
-type debugBuilderClient struct {
-	tb *TransactionBuilder
-}
-
 func newPfsBuilderClient(tb *TransactionBuilder) pfs.APIClient {
 	return &pfsBuilderClient{tb: tb}
 }
@@ -247,10 +242,6 @@ func newTransactionBuilderClient(tb *TransactionBuilder) transaction.APIClient {
 	return &transactionBuilderClient{tb: tb}
 }
 
-func newDebugBuilderClient(tb *TransactionBuilder) debug.DebugClient {
-	return &debugBuilderClient{tb: tb}
-}
-
 func newTransactionBuilder(parent *APIClient) *TransactionBuilder {
 	tb := &TransactionBuilder{parent: parent}
 	tb.PfsAPIClient = newPfsBuilderClient(tb)
@@ -260,7 +251,6 @@ func newTransactionBuilder(parent *APIClient) *TransactionBuilder {
 	tb.VersionAPIClient = newVersionBuilderClient(tb)
 	tb.AdminAPIClient = newAdminBuilderClient(tb)
 	tb.TransactionAPIClient = newTransactionBuilderClient(tb)
-	tb.DebugClient = newDebugBuilderClient(tb)
 	return tb
 }
 
@@ -687,14 +677,4 @@ func (c *transactionBuilderClient) FinishTransaction(ctx context.Context, req *t
 }
 func (c *transactionBuilderClient) DeleteAll(ctx context.Context, req *transaction.DeleteAllRequest, opts ...grpc.CallOption) (*types.Empty, error) {
 	return nil, unsupportedError("DeleteAll")
-}
-
-func (c *debugBuilderClient) Profile(ctx context.Context, req *debug.ProfileRequest, opts ...grpc.CallOption) (debug.Debug_ProfileClient, error) {
-	return nil, unsupportedError("Profile")
-}
-func (c *debugBuilderClient) Binary(ctx context.Context, req *debug.BinaryRequest, opts ...grpc.CallOption) (debug.Debug_BinaryClient, error) {
-	return nil, unsupportedError("Binary")
-}
-func (c *debugBuilderClient) Dump(ctx context.Context, req *debug.DumpRequest, opts ...grpc.CallOption) (debug.Debug_DumpClient, error) {
-	return nil, unsupportedError("Dump")
 }

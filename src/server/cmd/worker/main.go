@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/pachyderm/pachyderm/src/client"
-	debugclient "github.com/pachyderm/pachyderm/src/client/debug"
 	"github.com/pachyderm/pachyderm/src/client/pkg/errors"
 	"github.com/pachyderm/pachyderm/src/client/pkg/grpcutil"
 	"github.com/pachyderm/pachyderm/src/client/pkg/tracing"
@@ -15,7 +14,6 @@ import (
 	"github.com/pachyderm/pachyderm/src/client/version"
 	"github.com/pachyderm/pachyderm/src/client/version/versionpb"
 	"github.com/pachyderm/pachyderm/src/server/cmd/worker/assets"
-	debugserver "github.com/pachyderm/pachyderm/src/server/debug/server"
 	"github.com/pachyderm/pachyderm/src/server/pkg/cmdutil"
 	logutil "github.com/pachyderm/pachyderm/src/server/pkg/log"
 	"github.com/pachyderm/pachyderm/src/server/pkg/ppsutil"
@@ -102,7 +100,6 @@ func do(config interface{}) error {
 
 	workerserver.RegisterWorkerServer(server.Server, workerInstance.APIServer)
 	versionpb.RegisterAPIServer(server.Server, version.NewAPIServer(version.Version, version.APIServerOptions{}))
-	debugclient.RegisterDebugServer(server.Server, debugserver.NewDebugServer(env, env.PodName, pachClient))
 
 	// Put our IP address into etcd, so pachd can discover us
 	key := path.Join(env.PPSEtcdPrefix, workerserver.WorkerEtcdPrefix, workerRcName, env.PPSWorkerIP)

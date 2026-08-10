@@ -27,7 +27,6 @@ import (
 
 	"github.com/pachyderm/pachyderm/src/client/admin"
 	"github.com/pachyderm/pachyderm/src/client/auth"
-	"github.com/pachyderm/pachyderm/src/client/debug"
 	"github.com/pachyderm/pachyderm/src/client/health"
 	"github.com/pachyderm/pachyderm/src/client/limit"
 	"github.com/pachyderm/pachyderm/src/client/pfs"
@@ -76,9 +75,6 @@ type AdminAPIClient admin.APIClient
 // TransactionAPIClient is an alias of transaction.APIClient
 type TransactionAPIClient transaction.APIClient
 
-// DebugClient is an alias of debug.DebugClient
-type DebugClient debug.DebugClient
-
 // An APIClient is a wrapper around pfs, pps and block APIClients.
 type APIClient struct {
 	PfsAPIClient
@@ -88,8 +84,6 @@ type APIClient struct {
 	VersionAPIClient
 	AdminAPIClient
 	TransactionAPIClient
-	DebugClient
-
 	// addr is a "host:port" string pointing at a pachd endpoint
 	addr string
 
@@ -676,7 +670,6 @@ func (c *APIClient) connect(timeout time.Duration, unaryInterceptors []grpc.Unar
 	c.VersionAPIClient = versionpb.NewAPIClient(clientConn)
 	c.AdminAPIClient = admin.NewAPIClient(clientConn)
 	c.TransactionAPIClient = transaction.NewAPIClient(clientConn)
-	c.DebugClient = debug.NewDebugClient(clientConn)
 	c.clientConn = clientConn
 	c.healthClient = health.NewHealthClient(clientConn)
 	return nil

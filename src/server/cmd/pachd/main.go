@@ -16,7 +16,6 @@ import (
 
 	adminclient "github.com/pachyderm/pachyderm/src/client/admin"
 	authclient "github.com/pachyderm/pachyderm/src/client/auth"
-	debugclient "github.com/pachyderm/pachyderm/src/client/debug"
 	healthclient "github.com/pachyderm/pachyderm/src/client/health"
 	pfsclient "github.com/pachyderm/pachyderm/src/client/pfs"
 	"github.com/pachyderm/pachyderm/src/client/pkg/discovery"
@@ -30,7 +29,6 @@ import (
 	"github.com/pachyderm/pachyderm/src/client/version/versionpb"
 	adminserver "github.com/pachyderm/pachyderm/src/server/admin/server"
 	authserver "github.com/pachyderm/pachyderm/src/server/auth/server"
-	debugserver "github.com/pachyderm/pachyderm/src/server/debug/server"
 	"github.com/pachyderm/pachyderm/src/server/health"
 	pach_http "github.com/pachyderm/pachyderm/src/server/http"
 	"github.com/pachyderm/pachyderm/src/server/pfs/s3"
@@ -373,16 +371,6 @@ func doSidecarMode(config interface{}) (retErr error) {
 	}); err != nil {
 		return err
 	}
-	if err := logGRPCServerSetup("Debug", func() error {
-		debugclient.RegisterDebugServer(server.Server, debugserver.NewDebugServer(
-			env,
-			env.PachdPodName,
-			nil,
-		))
-		return nil
-	}); err != nil {
-		return err
-	}
 	txnEnv.Initialize(env, transactionAPIServer, authAPIServer, pfsAPIServer, ppsAPIServer)
 	// The sidecar only needs to serve traffic on the peer port, as it only serves
 	// traffic from the user container (the worker binary and occasionally user
@@ -721,16 +709,6 @@ func runFullMode(env *serviceenv.ServiceEnv, rt *localclient.Runtime) (retErr er
 		}
 		if err := logGRPCServerSetup("Version API", func() error {
 			versionpb.RegisterAPIServer(externalServer.Server, version.NewAPIServer(version.Version, version.APIServerOptions{}))
-			return nil
-		}); err != nil {
-			return err
-		}
-		if err := logGRPCServerSetup("Debug", func() error {
-			debugclient.RegisterDebugServer(externalServer.Server, debugserver.NewDebugServer(
-				env,
-				env.PachdPodName,
-				nil,
-			))
 			return nil
 		}); err != nil {
 			return err

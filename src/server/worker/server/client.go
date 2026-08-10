@@ -10,7 +10,6 @@ import (
 
 	"github.com/gogo/protobuf/types"
 	"github.com/pachyderm/pachyderm/src/client"
-	"github.com/pachyderm/pachyderm/src/client/debug"
 	"github.com/pachyderm/pachyderm/src/client/pkg/errors"
 	"github.com/pachyderm/pachyderm/src/client/pps"
 
@@ -107,13 +106,11 @@ func Conns(ctx context.Context, pipelineRcName string, etcdClient *etcd.Client, 
 // Client combines the WorkerAPI and the DebugAPI into a single client.
 type Client struct {
 	WorkerClient
-	debug.DebugClient
 }
 
 func newClient(conn *grpc.ClientConn) Client {
 	return Client{
 		NewWorkerClient(conn),
-		debug.NewDebugClient(conn),
 	}
 }
 
