@@ -37,12 +37,12 @@ import (
 	"github.com/pachyderm/pachyderm/src/client/pkg/grpcutil"
 	"github.com/pachyderm/pachyderm/src/client/pkg/require"
 	"github.com/pachyderm/pachyderm/src/client/pps"
-	"github.com/pachyderm/pachyderm/src/server/pkg/agent"
-	"github.com/pachyderm/pachyderm/src/server/pkg/netutil"
 	pfspretty "github.com/pachyderm/pachyderm/src/server/pfs/pretty"
+	"github.com/pachyderm/pachyderm/src/server/pkg/agent"
 	"github.com/pachyderm/pachyderm/src/server/pkg/ancestry"
 	"github.com/pachyderm/pachyderm/src/server/pkg/backoff"
 	col "github.com/pachyderm/pachyderm/src/server/pkg/collection"
+	"github.com/pachyderm/pachyderm/src/server/pkg/netutil"
 	"github.com/pachyderm/pachyderm/src/server/pkg/ppsconsts"
 	"github.com/pachyderm/pachyderm/src/server/pkg/ppsutil"
 	"github.com/pachyderm/pachyderm/src/server/pkg/pretty"
@@ -7385,9 +7385,6 @@ func TestCronPipeline(t *testing.T) {
 	if os.Getenv("RUN_BAD_TESTS") == "" {
 		t.Skip("Skipping because RUN_BAD_TESTS was empty")
 	}
-	if tu.LocalMode() {
-		t.Skip("upstream cron bug: cron file paths embed the machine timezone offset, which PFS path validation rejects")
-	}
 	if testing.Short() {
 		t.Skip("Skipping integration tests in short mode")
 	}
@@ -10911,12 +10908,6 @@ func TestSpoutPipe(t *testing.T) {
 		require.NoError(t, c.DeleteAll())
 	})
 	t.Run("SpoutPython", func(t *testing.T) {
-		if tu.LocalMode() {
-			// The official python:latest image no longer ships
-			// /usr/bin/python (it moved to /usr/local/bin/python), so this
-			// subtest's hardcoded Cmd is broken against current images.
-			t.Skip("python:latest no longer provides /usr/bin/python")
-		}
 		dataRepo := tu.UniqueString("TestSpoutPython_data")
 		require.NoError(t, c.CreateRepo(dataRepo))
 
@@ -10928,7 +10919,10 @@ func TestSpoutPipe(t *testing.T) {
 				Pipeline: client.NewPipeline(pipeline),
 				Transform: &pps.Transform{
 					Image: "python:latest",
-					Cmd:   []string{"/usr/bin/python"},
+					// The official python image installs its interpreter at
+					// /usr/local/bin/python (source-built); /usr/bin/python
+					// is not shipped.
+					Cmd: []string{"/usr/local/bin/python"},
 					Stdin: []string{`
 import io
 import random

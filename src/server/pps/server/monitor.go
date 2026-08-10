@@ -485,8 +485,10 @@ func (m *ppsMaster) makeCronCommits(pachClient *client.APIClient, in *pps.Input)
 			}
 		}
 
-		// Put in an empty file named by the timestamp
-		_, err = pachClient.PutFile(in.Cron.Repo, "master", next.Format(time.RFC3339), strings.NewReader(""))
+		// Put in an empty file named by the timestamp. The timestamp is
+		// rendered in UTC: a host-timezone offset would embed a '+' in the
+		// path, which PFS rejects as a globbing character.
+		_, err = pachClient.PutFile(in.Cron.Repo, "master", next.UTC().Format(time.RFC3339), strings.NewReader(""))
 		if err != nil {
 			return errors.Wrapf(err, "put error")
 		}

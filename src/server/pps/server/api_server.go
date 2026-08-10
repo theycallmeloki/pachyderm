@@ -3633,8 +3633,10 @@ func (a *apiServer) RunCron(ctx context.Context, request *pps.RunCronRequest) (r
 			}
 		}
 
-		// Put in an empty file named by the timestamp
-		_, err = pfc.PutFile(cron.Repo, "master", time.Now().Format(time.RFC3339), strings.NewReader(""))
+		// Put in an empty file named by the timestamp. The timestamp is
+		// rendered in UTC: a host-timezone offset would embed a '+' in the
+		// path, which PFS rejects as a globbing character.
+		_, err = pfc.PutFile(cron.Repo, "master", time.Now().UTC().Format(time.RFC3339), strings.NewReader(""))
 		if err != nil {
 			return nil, errors.Wrapf(err, "put error")
 		}
